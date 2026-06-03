@@ -49,7 +49,10 @@ def kino_yuborish(message):
     raqam = int(message.text.strip())
     if raqam in kinolar:
         kino = kinolar[raqam]
-        bot.send_video(message.chat.id, kino['file_id'], caption=f"{kino['nomi']} | {kino['yil']}")
+        try:
+            bot.send_video(message.chat.id, kino['file_id'], caption=kino['nomi'])
+        except:
+            bot.send_document(message.chat.id, kino['file_id'], caption=kino['nomi'])
     else:
         bot.send_message(message.chat.id, f"{raqam} raqamli kino topilmadi!")
 
@@ -70,8 +73,8 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "Ruxsat yoq!")
         return
     if call.data == "kino_qosh":
-        msg = bot.send_message(call.message.chat.id, "Kino nomini yozing:")
-        bot.register_next_step_handler(msg, kino_nom_olish)
+        msg = bot.send_message(call.message.chat.id, "Kino raqamini yozing:")
+        bot.register_next_step_handler(msg, kino_raqam_olish)
     elif call.data == "kino_ochir":
         if not kinolar:
             bot.send_message(call.message.chat.id, "Kino yoq.")
@@ -84,27 +87,35 @@ def callback_handler(call):
             return
         matn = "Barcha Kinolar:\n\n"
         for raqam, kino in kinolar.items():
-            matn += f"{raqam}. {kino['nomi']} | {kino['yil']}\n"
+            matn += f"{raqam}. {kino['nomi']}\n"
         bot.send_message(call.message.chat.id, matn)
 
-def kino_nom_olish(message):
-    msg = bot.send_message(message.chat.id, "Yilini yozing:")
-    bot.register_next_step_handler(msg, lambda m: kino_yil_olish(m, message.text))
+def kino_raqam_olish(message):
+    try:
+        raqam = int(message.text.strip())
+        msg = bot.send_message(message.chat.id, f"Raqam: {raqam}\nEndi kino nomini yozing:")
+        bot.register_next_step_handler(msg, lambda m: kino_nom_olish(m, raqam))
+    except:
+        bot.send_message(message.chat.id, "Raqam kiriting!")
 
-def kino_yil_olish(message, nomi):
-    msg = bot.send_message(message.chat.id, "Endi video faylni yuboring:")
-    bot.register_next_step_handler(msg, lambda m: kino_video_olish(m, nomi, message.text))
+def kino_nom_olish(message, raqam):
+    nomi = message.text.strip()
+    msg = bot.send_message(message.chat.id, f"Nom: {nomi}\nEndi video faylni yuboring:")
+    bot.register_next_step_handler(msg, lambda m: kino_video_olish(m, raqam, nomi))
 
-def kino_video_olish(message, nomi, yil):
+def kino_video_olish(message, raqam, nomi):
     global kino_counter
     if message.video:
         file_id = message.video.file_id
-        kinolar[kino_counter] = {"nomi": nomi, "yil": yil, "file_id": file_id}
-        kinolar_saqlash(kinolar)
-        bot.send_message(message.chat.id, f"Kino qoshildi! Raqam: {kino_counter}\nNomi: {nomi}")
-        kino_counter += 1
+    elif message.document:
+        file_id = message.document.file_id
     else:
         bot.send_message(message.chat.id, "Video yuboring!")
+        return
+
+    kinolar[raqam] = {"nomi": nomi, "file_id": file_id}
+    kinolar_saqlash(kinolar)
+    bot.send_message(message.chat.id, f"Kino qoshildi!\nRaqam: {raqam}\nNomi: {nomi}")
 
 def kino_ochirish(message):
     global kinolar
@@ -121,4 +132,4 @@ def kino_ochirish(message):
         bot.send_message(message.chat.id, "Raqam kiriting!")
 
 print("Bot ishlamoqda...")
-bot.polling(none_stop=True)
+bot.polling(none_stop=True)        
