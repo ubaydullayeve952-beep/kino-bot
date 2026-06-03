@@ -1,12 +1,27 @@
 import telebot
+import json
+import os
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 TOKEN = "8609768408:AAGOg5DA2xEVpldpx5OZPLx-b6_T4LKtvIs"
 ADMIN_ID = 8552250498
 
 bot = telebot.TeleBot(TOKEN)
-kinolar = {}
-kino_counter = 1
+FAYL = "kinolar.json"
+
+def kinolar_yuklash():
+    if os.path.exists(FAYL):
+        with open(FAYL, "r") as f:
+            data = json.load(f)
+            return {int(k): v for k, v in data.items()}
+    return {}
+
+def kinolar_saqlash(kinolar):
+    with open(FAYL, "w") as f:
+        json.dump(kinolar, f)
+
+kinolar = kinolar_yuklash()
+kino_counter = max(kinolar.keys(), default=0) + 1
 
 def admin_mi(user_id):
     return user_id == ADMIN_ID
@@ -61,7 +76,7 @@ def callback_handler(call):
         if not kinolar:
             bot.send_message(call.message.chat.id, "Kino yoq.")
             return
-        msg = bot.send_message(call.message.chat.id, "Qaysi raqamli kinoni ochirish kerak?")
+        msg = bot.send_message(call.message.chat.id, "Qaysi raqamni ochirish kerak?")
         bot.register_next_step_handler(msg, kino_ochirish)
     elif call.data == "kino_list":
         if not kinolar:
@@ -73,29 +88,32 @@ def callback_handler(call):
         bot.send_message(call.message.chat.id, matn)
 
 def kino_nom_olish(message):
-    bot.send_message(message.chat.id, "Yilini yozing:")
-    bot.register_next_step_handler(message, lambda m: kino_yil_olish(m, message.text))
+    msg = bot.send_message(message.chat.id, "Yilini yozing:")
+    bot.register_next_step_handler(msg, lambda m: kino_yil_olish(m, message.text))
 
 def kino_yil_olish(message, nomi):
-    bot.send_message(message.chat.id, "Endi video faylni yuboring:")
-    bot.register_next_step_handler(message, lambda m: kino_video_olish(m, nomi, message.text))
+    msg = bot.send_message(message.chat.id, "Endi video faylni yuboring:")
+    bot.register_next_step_handler(msg, lambda m: kino_video_olish(m, nomi, message.text))
 
 def kino_video_olish(message, nomi, yil):
     global kino_counter
     if message.video:
         file_id = message.video.file_id
         kinolar[kino_counter] = {"nomi": nomi, "yil": yil, "file_id": file_id}
+        kinolar_saqlash(kinolar)
         bot.send_message(message.chat.id, f"Kino qoshildi! Raqam: {kino_counter}\nNomi: {nomi}")
         kino_counter += 1
     else:
         bot.send_message(message.chat.id, "Video yuboring!")
 
 def kino_ochirish(message):
+    global kinolar
     try:
         raqam = int(message.text.strip())
         if raqam in kinolar:
             nomi = kinolar[raqam]["nomi"]
             del kinolar[raqam]
+            kinolar_saqlash(kinolar)
             bot.send_message(message.chat.id, f"{nomi} ochirildi!")
         else:
             bot.send_message(message.chat.id, f"{raqam} raqamli kino topilmadi!")
