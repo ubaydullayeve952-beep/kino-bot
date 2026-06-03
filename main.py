@@ -6,6 +6,13 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 TOKEN = "8609768408:AAGOg5DA2xEVpldpx5OZPLx-b6_T4LKtvIs"
 ADMIN_ID = 8552250498
 
+HOMIYLAR = [
+    "@rovshan_uzz",
+    "@uzbekcha_kinolarmi",
+]
+
+KANAL = "https://t.me/uzbekcha_kinolarmi"
+
 bot = telebot.TeleBot(TOKEN)
 FAYL = "kinolar.json"
 
@@ -25,10 +32,34 @@ kinolar = kinolar_yuklash()
 def admin_mi(user_id):
     return user_id == ADMIN_ID
 
+def obuna_tekshir(user_id):
+    for kanal in HOMIYLAR:
+        try:
+            member = bot.get_chat_member(kanal, user_id)
+            if member.status in ["left", "kicked"]:
+                return False
+        except:
+            return False
+    return True
+
+def obuna_tugmalari():
+    tugmalar = InlineKeyboardMarkup()
+    for kanal in HOMIYLAR:
+        tugmalar.add(InlineKeyboardButton(f"Obuna bolish {kanal}", url=f"https://t.me/{kanal[1:]}"))
+    tugmalar.add(InlineKeyboardButton("Tekshirish ✅", callback_data="tekshir"))
+    return tugmalar
+
 @bot.message_handler(commands=["start"])
 def start(message):
     if admin_mi(message.from_user.id):
         admin_panel(message)
+        return
+    if HOMIYLAR and not obuna_tekshir(message.from_user.id):
+        bot.send_message(
+            message.chat.id,
+            "Botdan foydalanish uchun quyidagi kanallarga obuna boling!",
+            reply_markup=obuna_tugmalari()
+        )
         return
     bot.send_message(message.chat.id, "Kino Botga Xush Kelibsiz!\nKino raqamini yuboring!\n/kinolar royxat")
 
@@ -45,22 +76,33 @@ def kinolar_royxati(message):
 
 @bot.message_handler(func=lambda m: m.text and m.text.isdigit() and not admin_mi(m.from_user.id))
 def kino_yuborish(message):
+    if HOMIYLAR and not obuna_tekshir(message.from_user.id):
+        bot.send_message(
+            message.chat.id,
+            "Botdan foydalanish uchun quyidagi kanallarga obuna boling!",
+            reply_markup=obuna_tugmalari()
+        )
+        return
     raqam = int(message.text.strip())
     if raqam in kinolar:
         kino = kinolar[raqam]
         file_id = kino['file_id']
         tip = kino.get('tip', 'video')
+        kanal_matn = f"\n\n🎬 Yangi kinolar: {KANAL}"
         try:
             if tip == 'document':
-                bot.send_document(message.chat.id, file_id, caption=kino['nomi'])
+                bot.send_document(message.chat.id, file_id, caption=kino['nomi'] + kanal_matn)
             elif tip == 'animation':
-                bot.send_animation(message.chat.id, file_id, caption=kino['nomi'])
+                bot.send_animation(message.chat.id, file_id, caption=kino['nomi'] + kanal_matn)
             else:
-                bot.send_video(message.chat.id, file_id, caption=kino['nomi'])
+                bot.send_video(message.chat.id, file_id, caption=kino['nomi'] + kanal_matn)
         except:
-            bot.send_document(message.chat.id, file_id, caption=kino['nomi'])
+            bot.send_document(message.chat.id, file_id, caption=kino['nomi'] + kanal_matn)
     else:
-        bot.send_message(message.chat.id, f"{raqam} raqamli kino topilmadi!")
+        bot.send_message(
+            message.chat.id,
+            f"{raqam} raqamli kino topilmadi!\n\n🎬 Barcha kinolar: {KANAL}"
+        )
 
 @bot.message_handler(commands=["admin"])
 def admin_panel(message):
@@ -75,9 +117,18 @@ def admin_panel(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
+    if call.data == "tekshir":
+        if obuna_tekshir(call.from_user.id):
+            bot.send_message(call.message.chat.id, "Rahmat! Endi botdan foydalanishingiz mumkin!")
+        else:
+            bot.answer_callback_query(call.id, "Hali obuna bolmadingiz!")
+            bot.send_message(call.message.chat.id, "Barcha kanallarga obuna boling!", reply_markup=obuna_tugmalari())
+        return
+
     if not admin_mi(call.from_user.id):
         bot.answer_callback_query(call.id, "Ruxsat yoq!")
         return
+
     if call.data == "kino_qosh":
         msg = bot.send_message(call.message.chat.id, "Kino raqamini yozing:")
         bot.register_next_step_handler(msg, kino_raqam_olish)
@@ -131,7 +182,7 @@ def kino_video_olish(message, raqam, nomi):
         kinolar_saqlash(kinolar)
         bot.send_message(message.chat.id, f"Kino qoshildi!\nRaqam: {raqam}\nNomi: {nomi}")
     else:
-        bot.send_message(message.chat.id, f"Xato! Fayl turi: {message.content_type}\nQaytadan yuboring!")
+        bot.send_message(message.chat.id, f"Xato! Tur: {message.content_type}\nQaytadan yuboring!")
 
 def kino_ochirish(message):
     global kinolar
