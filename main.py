@@ -21,7 +21,6 @@ def kinolar_saqlash(kinolar):
         json.dump(kinolar, f)
 
 kinolar = kinolar_yuklash()
-kino_counter = max(kinolar.keys(), default=0) + 1
 
 def admin_mi(user_id):
     return user_id == ADMIN_ID
@@ -44,15 +43,22 @@ def kinolar_royxati(message):
     matn += "\nRaqam yuboring!"
     bot.send_message(message.chat.id, matn)
 
-@bot.message_handler(func=lambda m: m.text.isdigit() and not admin_mi(m.from_user.id))
+@bot.message_handler(func=lambda m: m.text and m.text.isdigit() and not admin_mi(m.from_user.id))
 def kino_yuborish(message):
     raqam = int(message.text.strip())
     if raqam in kinolar:
         kino = kinolar[raqam]
+        file_id = kino['file_id']
+        tip = kino.get('tip', 'video')
         try:
-            bot.send_video(message.chat.id, kino['file_id'], caption=kino['nomi'])
+            if tip == 'document':
+                bot.send_document(message.chat.id, file_id, caption=kino['nomi'])
+            elif tip == 'animation':
+                bot.send_animation(message.chat.id, file_id, caption=kino['nomi'])
+            else:
+                bot.send_video(message.chat.id, file_id, caption=kino['nomi'])
         except:
-            bot.send_document(message.chat.id, kino['file_id'], caption=kino['nomi'])
+            bot.send_document(message.chat.id, file_id, caption=kino['nomi'])
     else:
         bot.send_message(message.chat.id, f"{raqam} raqamli kino topilmadi!")
 
@@ -93,29 +99,39 @@ def callback_handler(call):
 def kino_raqam_olish(message):
     try:
         raqam = int(message.text.strip())
-        msg = bot.send_message(message.chat.id, f"Raqam: {raqam}\nEndi kino nomini yozing:")
+        msg = bot.send_message(message.chat.id, f"Raqam: {raqam}\nKino nomini yozing:")
         bot.register_next_step_handler(msg, lambda m: kino_nom_olish(m, raqam))
     except:
         bot.send_message(message.chat.id, "Raqam kiriting!")
 
 def kino_nom_olish(message, raqam):
     nomi = message.text.strip()
-    msg = bot.send_message(message.chat.id, f"Nom: {nomi}\nEndi video faylni yuboring:")
+    msg = bot.send_message(message.chat.id, f"Nom: {nomi}\nEndi video yuboring:")
     bot.register_next_step_handler(msg, lambda m: kino_video_olish(m, raqam, nomi))
 
 def kino_video_olish(message, raqam, nomi):
-    global kino_counter
+    file_id = None
+    tip = None
+
     if message.video:
         file_id = message.video.file_id
+        tip = "video"
     elif message.document:
         file_id = message.document.file_id
-    else:
-        bot.send_message(message.chat.id, "Video yuboring!")
-        return
+        tip = "document"
+    elif message.animation:
+        file_id = message.animation.file_id
+        tip = "animation"
+    elif message.video_note:
+        file_id = message.video_note.file_id
+        tip = "video_note"
 
-    kinolar[raqam] = {"nomi": nomi, "file_id": file_id}
-    kinolar_saqlash(kinolar)
-    bot.send_message(message.chat.id, f"Kino qoshildi!\nRaqam: {raqam}\nNomi: {nomi}")
+    if file_id:
+        kinolar[raqam] = {"nomi": nomi, "file_id": file_id, "tip": tip}
+        kinolar_saqlash(kinolar)
+        bot.send_message(message.chat.id, f"Kino qoshildi!\nRaqam: {raqam}\nNomi: {nomi}")
+    else:
+        bot.send_message(message.chat.id, f"Xato! Fayl turi: {message.content_type}\nQaytadan yuboring!")
 
 def kino_ochirish(message):
     global kinolar
@@ -132,4 +148,4 @@ def kino_ochirish(message):
         bot.send_message(message.chat.id, "Raqam kiriting!")
 
 print("Bot ishlamoqda...")
-bot.polling(none_stop=True)        
+bot.polling(none_stop=True)
