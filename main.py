@@ -4,7 +4,7 @@ import os
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 TOKEN = "8609768408:AAGOg5DA2xEVpldpx5OZPLx-b6_T4LKtvIs"
-ADMIN_ID = 8552250498
+ADMIN_ID = 8965276284
 
 HOMIYLAR = [
     "@uzbekcha_kinolarmi",
