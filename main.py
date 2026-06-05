@@ -7,8 +7,7 @@ TOKEN = "8609768408:AAGOg5DA2xEVpldpx5OZPLx-b6_T4LKtvIs"
 ADMIN_ID = 8552250498
 
 HOMIYLAR = [
-    "@birinchi_kanal",
-    "@ikkinchi_kanal",
+    "@uzbekcha_kinolarmi",
 ]
 
 KANAL = "https://t.me/uzbekcha_kinolarmi"
