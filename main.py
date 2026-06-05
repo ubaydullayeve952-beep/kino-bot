@@ -10,7 +10,7 @@ HOMIYLAR = [
     "@uzbekcha_kinolarmi",
 ]
 
-KANAL = "https://t.me/uzbekcha_kinolarmi"
+KANAL = "https://@uzbekcha_kinolarmi"
 
 bot = telebot.TeleBot(TOKEN)
 FAYL = "kinolar.json"
