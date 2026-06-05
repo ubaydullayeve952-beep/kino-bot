@@ -7,10 +7,11 @@ TOKEN = "8609768408:AAGOg5DA2xEVpldpx5OZPLx-b6_T4LKtvIs"
 ADMIN_ID = 8552250498
 
 HOMIYLAR = [
-    "@uzbekcha_kinolarmi",
+    "@birinchi_kanal",
+    "@ikkinchi_kanal",
 ]
 
-KANAL = "https://@uzbekcha_kinolarmi"
+KANAL = "https://t.me/uzbekcha_kinolarmi"
 
 bot = telebot.TeleBot(TOKEN)
 FAYL = "kinolar.json"
