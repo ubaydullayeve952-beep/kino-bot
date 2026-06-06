@@ -5,6 +5,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 TOKEN = "8991054869:AAHeRKQ91FtfZb7I9Q1BJEnYPh1aUNfm42g"
 ADMIN_ID = 8965276284
+ADMIN_ID = 7355716658
 
 bot = telebot.TeleBot(TOKEN)
 FAYL = "kinolar.json"
