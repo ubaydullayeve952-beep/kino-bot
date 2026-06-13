@@ -1,61 +1,72 @@
 import telebot
-import json
 import os
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pymongo import MongoClient
 
-TOKEN = "8991054869:AAHeRKQ91FtfZb7I9Q1BJEnYPh1aUNfm42g"
+TOKEN = os.getenv("TOKEN", "8991054869:AAHeRKQ91FtfZb7I9Q1BJEnYPh1aUNfm42g")
 ADMIN_ID = 8965276284
 KANAL = "@uzbekcha_kinolarmi"
+MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://admin:ravshan0202@cluster0.8ncigsp.mongodb.net/?appName=Cluster0")
+
+# MongoDB ulanish
+client = MongoClient(MONGO_URL)
+db = client["kinodb"]
+kinolar_col = db["kinolar"]
+homiylar_col = db["homiylar"]
+stat_col = db["statistika"]
 
 bot = telebot.TeleBot(TOKEN)
-FAYL = "kinolar.json"
-HOMIY_FAYL = "homiylar.json"
-STAT_FAYL = "statistika.json"
+
+# --- MongoDB funksiyalar ---
 
 def kinolar_yuklash():
-    if os.path.exists(FAYL):
-        with open(FAYL, "r") as f:
-            data = json.load(f)
-            return {int(k): v for k, v in data.items()}
-    return {}
+    kinolar = {}
+    for k in kinolar_col.find():
+        kinolar[int(k["raqam"])] = {"nomi": k["nomi"], "file_id": k["file_id"], "tip": k["tip"]}
+    return kinolar
 
-def kinolar_saqlash(kinolar):
-    with open(FAYL, "w") as f:
-        json.dump(kinolar, f)
+def kino_saqlash(raqam, nomi, file_id, tip):
+    kinolar_col.update_one(
+        {"raqam": raqam},
+        {"$set": {"raqam": raqam, "nomi": nomi, "file_id": file_id, "tip": tip}},
+        upsert=True
+    )
+
+def kino_ochir(raqam):
+    kinolar_col.delete_one({"raqam": raqam})
 
 def homiylar_yuklash():
-    if os.path.exists(HOMIY_FAYL):
-        with open(HOMIY_FAYL, "r") as f:
-            return json.load(f)
-    return []
+    return [h["kanal"] for h in homiylar_col.find()]
 
-def homiylar_saqlash(homiylar):
-    with open(HOMIY_FAYL, "w") as f:
-        json.dump(homiylar, f)
+def homiy_saqlash(kanal):
+    if not homiylar_col.find_one({"kanal": kanal}):
+        homiylar_col.insert_one({"kanal": kanal})
+
+def homiy_ochir(kanal):
+    homiylar_col.delete_one({"kanal": kanal})
 
 def stat_yuklash():
-    if os.path.exists(STAT_FAYL):
-        with open(STAT_FAYL, "r") as f:
-            return json.load(f)
-    return {"foydalanuvchilar": [], "sorovlar": 0}
+    s = stat_col.find_one({"_id": "stat"})
+    if s:
+        return s
+    return {"_id": "stat", "foydalanuvchilar": [], "sorovlar": 0}
 
 def stat_saqlash(stat):
-    with open(STAT_FAYL, "w") as f:
-        json.dump(stat, f)
-
-kinolar = kinolar_yuklash()
-homiylar = homiylar_yuklash()
-stat = stat_yuklash()
-
-def admin_mi(user_id):
-    return user_id == ADMIN_ID
+    stat_col.update_one({"_id": "stat"}, {"$set": stat}, upsert=True)
 
 def foydalanuvchi_qosh(user_id):
+    stat = stat_yuklash()
     if str(user_id) not in stat["foydalanuvchilar"]:
         stat["foydalanuvchilar"].append(str(user_id))
         stat_saqlash(stat)
 
+# --- Bot funksiyalar ---
+
+def admin_mi(user_id):
+    return user_id == ADMIN_ID
+
 def obuna_tekshir(user_id):
+    homiylar = homiylar_yuklash()
     for kanal in homiylar:
         try:
             member = bot.get_chat_member(kanal, user_id)
@@ -66,6 +77,7 @@ def obuna_tekshir(user_id):
     return True
 
 def obuna_tugmalari():
+    homiylar = homiylar_yuklash()
     tugmalar = InlineKeyboardMarkup()
     for kanal in homiylar:
         tugmalar.add(InlineKeyboardButton(f"Obuna bolish {kanal}", url=f"https://t.me/{kanal[1:]}"))
@@ -78,6 +90,7 @@ def start(message):
         admin_panel(message)
         return
     foydalanuvchi_qosh(message.from_user.id)
+    homiylar = homiylar_yuklash()
     if homiylar and not obuna_tekshir(message.from_user.id):
         bot.send_message(
             message.chat.id,
@@ -95,6 +108,7 @@ def start(message):
 
 @bot.message_handler(func=lambda m: m.text and m.text.isdigit() and not admin_mi(m.from_user.id))
 def kino_yuborish(message):
+    homiylar = homiylar_yuklash()
     if homiylar and not obuna_tekshir(message.from_user.id):
         bot.send_message(
             message.chat.id,
@@ -102,9 +116,11 @@ def kino_yuborish(message):
             reply_markup=obuna_tugmalari()
         )
         return
+    stat = stat_yuklash()
     stat["sorovlar"] += 1
     stat_saqlash(stat)
     raqam = int(message.text.strip())
+    kinolar = kinolar_yuklash()
     if raqam in kinolar:
         kino = kinolar[raqam]
         file_id = kino['file_id']
@@ -170,6 +186,7 @@ def callback_handler(call):
         bot.register_next_step_handler(msg, kino_raqam_olish)
 
     elif call.data == "kino_ochir":
+        kinolar = kinolar_yuklash()
         if not kinolar:
             bot.send_message(call.message.chat.id, "Kino yoq.")
             return
@@ -177,6 +194,7 @@ def callback_handler(call):
         bot.register_next_step_handler(msg, kino_ochirish)
 
     elif call.data == "kino_list":
+        kinolar = kinolar_yuklash()
         if not kinolar:
             bot.send_message(call.message.chat.id, "Kino yoq.")
             return
@@ -186,6 +204,9 @@ def callback_handler(call):
         bot.send_message(call.message.chat.id, matn)
 
     elif call.data == "statistika":
+        stat = stat_yuklash()
+        kinolar = kinolar_yuklash()
+        homiylar = homiylar_yuklash()
         matn = (
             f"📊 Statistika:\n\n"
             f"👥 Foydalanuvchilar: {len(stat['foydalanuvchilar'])}\n"
@@ -207,6 +228,7 @@ def callback_handler(call):
         bot.register_next_step_handler(msg, homiy_qoshish)
 
     elif call.data == "homiy_ochir":
+        homiylar = homiylar_yuklash()
         if not homiylar:
             bot.send_message(call.message.chat.id, "Homiy yoq.")
             return
@@ -218,6 +240,7 @@ def callback_handler(call):
         bot.register_next_step_handler(msg, homiy_ochirish)
 
     elif call.data == "homiy_list":
+        homiylar = homiylar_yuklash()
         if not homiylar:
             bot.send_message(call.message.chat.id, "Homiy yoq.")
             return
@@ -281,20 +304,18 @@ def kino_video_olish(message, raqam, nomi):
         file_id = message.video_note.file_id
         tip = "video_note"
     if file_id:
-        kinolar[raqam] = {"nomi": nomi, "file_id": file_id, "tip": tip}
-        kinolar_saqlash(kinolar)
+        kino_saqlash(raqam, nomi, file_id, tip)
         bot.send_message(message.chat.id, f"✅ Kino qoshildi!\nRaqam: {raqam}\nNomi: {nomi}")
     else:
         bot.send_message(message.chat.id, f"❌ Xato! Tur: {message.content_type}\nQaytadan yuboring!")
 
 def kino_ochirish(message):
-    global kinolar
     try:
         raqam = int(message.text.strip())
+        kinolar = kinolar_yuklash()
         if raqam in kinolar:
             nomi = kinolar[raqam]["nomi"]
-            del kinolar[raqam]
-            kinolar_saqlash(kinolar)
+            kino_ochir(raqam)
             bot.send_message(message.chat.id, f"✅ {nomi} ochirildi!")
         else:
             bot.send_message(message.chat.id, f"❌ {raqam} raqamli kino topilmadi!")
@@ -302,30 +323,28 @@ def kino_ochirish(message):
         bot.send_message(message.chat.id, "Raqam kiriting!")
 
 def homiy_qoshish(message):
-    global homiylar
     kanal = message.text.strip()
     if not kanal.startswith("@"):
         kanal = "@" + kanal
+    homiylar = homiylar_yuklash()
     if kanal not in homiylar:
-        homiylar.append(kanal)
-        homiylar_saqlash(homiylar)
+        homiy_saqlash(kanal)
         bot.send_message(message.chat.id, f"✅ {kanal} homiy qoshildi!")
     else:
         bot.send_message(message.chat.id, f"❌ {kanal} allaqachon bor!")
 
 def homiy_ochirish(message):
-    global homiylar
     try:
         raqam = int(message.text.strip()) - 1
+        homiylar = homiylar_yuklash()
         if 0 <= raqam < len(homiylar):
             nomi = homiylar[raqam]
-            homiylar.pop(raqam)
-            homiylar_saqlash(homiylar)
+            homiy_ochir(nomi)
             bot.send_message(message.chat.id, f"✅ {nomi} ochirildi!")
         else:
             bot.send_message(message.chat.id, "❌ Bunday raqam yoq!")
     except:
         bot.send_message(message.chat.id, "Raqam kiriting!")
 
-print("Bot ishlamoqda...")
+print("Bot ishlamoqda... MongoDB ulangan!")
 bot.polling(none_stop=True)
