@@ -18,16 +18,19 @@ adminlar_col = db["adminlar"]
 bot = telebot.TeleBot(TOKEN)
 
 # State saqlash — har bir admin uchun
-user_states = {}
-
 def set_state(user_id, state, data=None):
-    user_states[user_id] = {"state": state, "data": data or {}}
+    db["states"].update_one(
+        {"user_id": user_id},
+        {"$set": {"user_id": user_id, "state": state, "data": data or {}}},
+        upsert=True
+    )
 
 def get_state(user_id):
-    return user_states.get(user_id, {})
+    s = db["states"].find_one({"user_id": user_id})
+    return s if s else {}
 
 def clear_state(user_id):
-    user_states.pop(user_id, None)
+    db["states"].delete_one({"user_id": user_id})
 
 def admin_mi(user_id):
     if user_id == ADMIN_ID:
