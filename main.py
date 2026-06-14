@@ -421,8 +421,11 @@ def kino_video_olish(message, kod, nomi, qism):
         bot.send_message(message.chat.id, "❌ Video yuboring!")
 
 def get_file_id(message):
+    # Forward yoki oddiy video — ikkalasini ham qabul qiladi
     if message.video:
         return message.video.file_id, "video"
+    elif message.document and message.document.mime_type and "video" in message.document.mime_type:
+        return message.document.file_id, "document"
     elif message.document:
         return message.document.file_id, "document"
     elif message.animation:
