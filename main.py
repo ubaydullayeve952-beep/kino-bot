@@ -2,8 +2,7 @@ import telebot
 import os
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
-
-TOKEN = os.getenv("TOKEN", "8525964024:AAENdRuPsS86KDg9nqdiHbItZlyl0aT-KnU")
+TOKEN = os.getenv("TOKEN", "8525964024:AAHZjBbjGUDM86_uBHyfgNqG-ebUSNOEqMA")
 ADMIN_ID = 8965276284
 KANAL = "@uzbekcha_kinolarmi"
 MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://admin:ravshan0202@cluster0.8ncigsp.mongodb.net/?appName=Cluster0")
