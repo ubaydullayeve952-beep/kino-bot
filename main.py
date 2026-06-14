@@ -360,8 +360,25 @@ def universal(msg):
         clear_state(uid)
 
     elif state == "admin_qosh":
-        if msg.text and msg.text.strip().isdigit():
+    if msg.text and msg.text.strip().isdigit():
+        try:
             new_id = int(msg.text.strip())
+            if new_id == ADMIN_ID:
+                bot.send_message(msg.chat.id, "❌ Bu bosh admin!")
+            elif adminlar_col.find_one({"user_id": new_id}):
+                bot.send_message(msg.chat.id, "❌ Allaqachon admin!")
+            else:
+                adminlar_col.insert_one({"user_id": new_id})
+                bot.send_message(msg.chat.id, f"✅ {new_id} admin qilindi!")
+                try:
+                    bot.send_message(new_id, "🎉 Siz admin qilindingiz!")
+                except:
+                    pass
+        except Exception as e:
+            bot.send_message(msg.chat.id, f"❌ Xato: {e}")
+    else:
+        bot.send_message(msg.chat.id, "❌ Faqat raqam kiriting!")
+    clear_state(uid)
             if new_id == ADMIN_ID:
                 bot.send_message(msg.chat.id, "❌ Bu bosh admin!")
             elif adminlar_col.find_one({"user_id": new_id}):
