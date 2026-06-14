@@ -475,4 +475,5 @@ def callback_handler(call):
         bot.send_message(call.message.chat.id, matn)
 
 print("Bot ishlamoqda!")
-bot.polling(none_stop=True)
+bot.delete_webhook(drop_pending_updates=True)
+bot.polling(none_stop=True, timeout=60, long_polling_timeout=60)
