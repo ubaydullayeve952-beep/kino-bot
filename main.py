@@ -17,7 +17,6 @@ adminlar_col = db["adminlar"]
 
 bot = telebot.TeleBot(TOKEN)
 
-# State saqlash — har bir admin uchun
 user_states = {}
 
 def set_state(user_id, state, data=None):
@@ -37,7 +36,10 @@ def admin_mi(user_id):
 def kino_saqlash(kod, nomi, file_id, tip, qism=None):
     kinolar_col.update_one(
         {"kod": kod, "qism": qism},
-        {"$set": {"kod": kod, "nomi": nomi, "file_id": file_id, "tip": tip, "qism": qism, "korishlar": 0}},
+        {
+            "$set": {"kod": kod, "nomi": nomi, "file_id": file_id, "tip": tip, "qism": qism},
+            "$setOnInsert": {"korishlar": 0}
+        },
         upsert=True
     )
 
@@ -100,14 +102,23 @@ def obuna_tugmalari():
     return tugmalar
 
 def get_file_id(message):
+    """Xabardan file_id va turini olish — barcha turlarni qo'llab-quvvatlaydi"""
     if message.video:
         return message.video.file_id, "video"
     elif message.document:
-        return message.document.file_id, "document"
+        # Document ichida video bo'lishi mumkin
+        doc = message.document
+        if doc.mime_type and doc.mime_type.startswith("video"):
+            return doc.file_id, "video"
+        return doc.file_id, "document"
     elif message.animation:
         return message.animation.file_id, "animation"
     elif message.video_note:
         return message.video_note.file_id, "video_note"
+    elif message.audio:
+        return message.audio.file_id, "audio"
+    elif message.photo:
+        return message.photo[-1].file_id, "photo"
     return None, None
 
 def send_kino(chat_id, kino):
@@ -120,13 +131,17 @@ def send_kino(chat_id, kino):
             bot.send_document(chat_id, file_id, caption=caption)
         elif tip == "animation":
             bot.send_animation(chat_id, file_id, caption=caption)
+        elif tip == "photo":
+            bot.send_photo(chat_id, file_id, caption=caption)
+        elif tip == "audio":
+            bot.send_audio(chat_id, file_id, caption=caption)
         else:
             bot.send_video(chat_id, file_id, caption=caption)
-    except:
+    except Exception as e1:
         try:
             bot.send_document(chat_id, file_id, caption=caption)
-        except Exception as e:
-            bot.send_message(chat_id, f"❌ Xato: {e}")
+        except Exception as e2:
+            bot.send_message(chat_id, f"❌ Xato: {e2}")
 
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -172,7 +187,6 @@ def admin_panel(message):
     tugmalar.row(InlineKeyboardButton("👥 Adminlar Ro'yxati", callback_data="admin_list"))
     bot.send_message(message.chat.id, "👑 Admin Panel", reply_markup=tugmalar)
 
-# ASOSIY HANDLER — barcha xabarlar
 @bot.message_handler(content_types=["text", "video", "document", "animation", "video_note", "audio", "photo"])
 def universal_handler(message):
     user_id = message.from_user.id
@@ -180,9 +194,9 @@ def universal_handler(message):
     state = state_info.get("state")
     data = state_info.get("data", {})
 
-    # Admin bo'lmagan — kino izlash
+    # Admin emas — kino izlash
     if not admin_mi(user_id):
-        if message.text and message.text.isdigit():
+        if message.text and message.text.strip().isdigit():
             if homiylar_yuklash() and not obuna_tekshir(user_id):
                 bot.send_message(message.chat.id, "Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling!", reply_markup=obuna_tugmalari())
                 return
@@ -202,19 +216,21 @@ def universal_handler(message):
                 for kino in sorted(kinolar, key=lambda x: x.get("qism") or 0):
                     tugmalar.add(InlineKeyboardButton(f"📺 {kino['qism']}-qism", callback_data=f"qism_{kod}_{kino['qism']}"))
                 bot.send_message(message.chat.id, f"🎬 {kinolar[0]['nomi']}\nQism tanlang:", reply_markup=tugmalar)
+        else:
+            bot.send_message(message.chat.id, "Kino kodini yuboring (faqat raqam)!")
         return
 
     # Admin state machine
     if state == "kino_kod":
-        try:
+        if message.text and message.text.strip().isdigit():
             kod = int(message.text.strip())
             set_state(user_id, "kino_qismli", {"kod": kod})
             bot.send_message(message.chat.id, "Qismli kinomi?\n1 - Ha\n2 - Yo'q")
-        except:
+        else:
             bot.send_message(message.chat.id, "❌ Raqam kiriting!")
 
     elif state == "kino_qismli":
-        if message.text and message.text.strip() == "1":
+        if message.text and message.text.strip() in ["1", "ha", "Ha"]:
             set_state(user_id, "kino_qism_soni", data)
             bot.send_message(message.chat.id, "Necha qism?")
         else:
@@ -222,11 +238,11 @@ def universal_handler(message):
             bot.send_message(message.chat.id, "Kino nomini yozing:")
 
     elif state == "kino_qism_soni":
-        try:
+        if message.text and message.text.strip().isdigit():
             soni = int(message.text.strip())
             set_state(user_id, "kino_qismli_nom", {**data, "jami": soni, "joriy": 1})
             bot.send_message(message.chat.id, "Kino nomini yozing:")
-        except:
+        else:
             bot.send_message(message.chat.id, "❌ Raqam kiriting!")
 
     elif state == "kino_qismli_nom":
@@ -244,9 +260,9 @@ def universal_handler(message):
         if file_id:
             kino_saqlash(data["kod"], data["nomi"], file_id, tip, data.get("qism"))
             clear_state(user_id)
-            bot.send_message(message.chat.id, f"✅ Kino qo'shildi!\nKod: {data['kod']}\nNom: {data['nomi']}")
+            bot.send_message(message.chat.id, f"✅ Kino qo'shildi!\nKod: {data['kod']}\nNom: {data['nomi']}\nTur: {tip}")
         else:
-            bot.send_message(message.chat.id, f"❌ Video yuboring! (tur: {message.content_type})")
+            bot.send_message(message.chat.id, f"❌ Video yuboring! (kelgan tur: {message.content_type})")
 
     elif state == "kino_qismli_video":
         file_id, tip = get_file_id(message)
@@ -262,10 +278,10 @@ def universal_handler(message):
                 clear_state(user_id)
                 bot.send_message(message.chat.id, f"✅ Barcha {jami} qism saqlandi! Kod: {data['kod']}")
         else:
-            bot.send_message(message.chat.id, f"❌ Video yuboring! (tur: {message.content_type})")
+            bot.send_message(message.chat.id, f"❌ Video yuboring! (kelgan tur: {message.content_type})")
 
     elif state == "kino_ochir":
-        try:
+        if message.text and message.text.strip().isdigit():
             kod = int(message.text.strip())
             if kino_olish(kod):
                 kino_ochir(kod)
@@ -273,7 +289,7 @@ def universal_handler(message):
                 bot.send_message(message.chat.id, f"✅ {kod} kodli kino o'chirildi!")
             else:
                 bot.send_message(message.chat.id, f"❌ {kod} kodli kino topilmadi!")
-        except:
+        else:
             bot.send_message(message.chat.id, "❌ Raqam kiriting!")
 
     elif state == "post":
@@ -281,22 +297,28 @@ def universal_handler(message):
             try:
                 bot.send_photo(KANAL, message.photo[-1].file_id, caption=message.caption or "")
                 bot.send_message(message.chat.id, "✅ Post yuborildi!")
-            except:
-                bot.send_message(message.chat.id, "❌ Xato!")
+            except Exception as e:
+                bot.send_message(message.chat.id, f"❌ Xato: {e}")
         elif message.video:
             try:
                 bot.send_video(KANAL, message.video.file_id, caption=message.caption or "")
                 bot.send_message(message.chat.id, "✅ Post yuborildi!")
-            except:
-                bot.send_message(message.chat.id, "❌ Xato!")
+            except Exception as e:
+                bot.send_message(message.chat.id, f"❌ Xato: {e}")
+        elif message.document:
+            try:
+                bot.send_document(KANAL, message.document.file_id, caption=message.caption or "")
+                bot.send_message(message.chat.id, "✅ Post yuborildi!")
+            except Exception as e:
+                bot.send_message(message.chat.id, f"❌ Xato: {e}")
         elif message.text:
             try:
                 bot.send_message(KANAL, message.text)
                 bot.send_message(message.chat.id, "✅ Post yuborildi!")
-            except:
-                bot.send_message(message.chat.id, "❌ Xato!")
+            except Exception as e:
+                bot.send_message(message.chat.id, f"❌ Xato: {e}")
         else:
-            bot.send_message(message.chat.id, "❌ Faqat matn, rasm yoki video!")
+            bot.send_message(message.chat.id, "❌ Faqat matn, rasm, document yoki video!")
         clear_state(user_id)
 
     elif state == "homiy_qosh":
@@ -311,7 +333,7 @@ def universal_handler(message):
         clear_state(user_id)
 
     elif state == "homiy_ochir":
-        try:
+        if message.text and message.text.strip().isdigit():
             raqam = int(message.text.strip()) - 1
             homiylar = homiylar_yuklash()
             if 0 <= raqam < len(homiylar):
@@ -319,12 +341,12 @@ def universal_handler(message):
                 bot.send_message(message.chat.id, f"✅ {homiylar[raqam]} o'chirildi!")
             else:
                 bot.send_message(message.chat.id, "❌ Bunday raqam yo'q!")
-        except:
+        else:
             bot.send_message(message.chat.id, "❌ Raqam kiriting!")
         clear_state(user_id)
 
     elif state == "admin_qosh":
-        try:
+        if message.text and message.text.strip().isdigit():
             new_id = int(message.text.strip())
             if adminlar_col.find_one({"user_id": new_id}):
                 bot.send_message(message.chat.id, "❌ Allaqachon admin!")
@@ -335,12 +357,12 @@ def universal_handler(message):
                     bot.send_message(new_id, "✅ Siz admin qilindingiz!")
                 except:
                     pass
-        except:
+        else:
             bot.send_message(message.chat.id, "❌ Raqam kiriting!")
         clear_state(user_id)
 
     elif state == "admin_ochir":
-        try:
+        if message.text and message.text.strip().isdigit():
             raqam = int(message.text.strip()) - 1
             adminlar = list(adminlar_col.find())
             if 0 <= raqam < len(adminlar):
@@ -349,9 +371,14 @@ def universal_handler(message):
                 bot.send_message(message.chat.id, f"✅ {uid} admin o'chirildi!")
             else:
                 bot.send_message(message.chat.id, "❌ Bunday raqam yo'q!")
-        except:
+        else:
             bot.send_message(message.chat.id, "❌ Raqam kiriting!")
         clear_state(user_id)
+
+    else:
+        # Noma'lum state — admin panelga qaytarish
+        clear_state(user_id)
+        admin_panel(message)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -365,6 +392,8 @@ def callback_handler(call):
         if kino:
             korishlar_oshir(kod, qism)
             send_kino(call.message.chat.id, kino)
+        else:
+            bot.send_message(call.message.chat.id, "❌ Kino topilmadi!")
         return
 
     if call.data == "tekshir":
@@ -401,6 +430,9 @@ def callback_handler(call):
                 matn += f"{kod}. {klist[0]['nomi']} — 👁 {jami}\n"
             else:
                 matn += f"{kod}. {klist[0]['nomi']} ({len(klist)} qism) — 👁 {jami}\n"
+        # Telegram 4096 belgi limiti
+        if len(matn) > 4000:
+            matn = matn[:4000] + "\n..."
         bot.send_message(call.message.chat.id, matn)
 
     elif call.data == "statistika":
@@ -420,7 +452,7 @@ def callback_handler(call):
 
     elif call.data == "post_yuborish":
         set_state(user_id, "post")
-        bot.send_message(call.message.chat.id, "📢 Post matnini yozing:")
+        bot.send_message(call.message.chat.id, "📢 Post matnini, rasmini yoki videosini yuboring:")
 
     elif call.data == "homiy_qosh":
         set_state(user_id, "homiy_qosh")
@@ -472,4 +504,4 @@ def callback_handler(call):
         bot.send_message(call.message.chat.id, matn)
 
 print("Bot ishlamoqda!")
-bot.polling(none_stop=True)
+bot.polling(none_stop=True, interval=0, timeout=20)
