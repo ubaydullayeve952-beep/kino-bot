@@ -1,6 +1,5 @@
 import telebot
 import os
-import time
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
 
@@ -19,7 +18,6 @@ adminlar_col = db["adminlar"]
 bot = telebot.TeleBot(TOKEN)
 user_states = {}
 
-# ─── STATE ───────────────────────────────────────────────
 def set_state(uid, state, data=None):
     user_states[uid] = {"state": state, "data": data or {}}
 
@@ -29,13 +27,11 @@ def get_state(uid):
 def clear_state(uid):
     user_states.pop(uid, None)
 
-# ─── ADMIN ───────────────────────────────────────────────
 def admin_mi(uid):
     if uid == ADMIN_ID:
         return True
     return adminlar_col.find_one({"user_id": uid}) is not None
 
-# ─── KINO ────────────────────────────────────────────────
 def kino_saqlash(kod, nomi, file_id, tip, qism=None):
     kinolar_col.update_one(
         {"kod": kod, "qism": qism},
@@ -62,7 +58,6 @@ def barcha_kinolar():
         result[kod] = list(kinolar_col.find({"kod": kod}))
     return result
 
-# ─── HOMIY ───────────────────────────────────────────────
 def homiylar_yuklash():
     return [h["kanal"] for h in homiylar_col.find()]
 
@@ -73,7 +68,6 @@ def homiy_saqlash(kanal):
 def homiy_ochir(kanal):
     homiylar_col.delete_one({"kanal": kanal})
 
-# ─── STATISTIKA ──────────────────────────────────────────
 def stat_yuklash():
     s = stat_col.find_one({"_id": "stat"})
     return s if s else {"_id": "stat", "foydalanuvchilar": [], "sorovlar": 0}
@@ -87,7 +81,6 @@ def foydalanuvchi_qosh(uid):
         stat["foydalanuvchilar"].append(str(uid))
         stat_saqlash(stat)
 
-# ─── OBUNA ───────────────────────────────────────────────
 def obuna_tekshir(uid):
     for kanal in homiylar_yuklash():
         try:
@@ -105,31 +98,49 @@ def obuna_tugmalari():
     m.add(InlineKeyboardButton("🔄 Tekshirish", callback_data="tekshir"))
     return m
 
-# ─── FILE ID OLISH ───────────────────────────────────────
 def get_file_id(message):
-    """Har qanday media turidan file_id oladi"""
+    """Har qanday holatda file_id oladi — forward, caption bilan ham"""
+    # 1. Oddiy video
     if message.video:
         return message.video.file_id, "video"
+    # 2. Document (forward qilingan video document bo'lib kelishi mumkin)
     if message.document:
         mime = message.document.mime_type or ""
         if mime.startswith("video"):
             return message.document.file_id, "video"
         return message.document.file_id, "document"
+    # 3. Animation / GIF
     if message.animation:
         return message.animation.file_id, "animation"
+    # 4. Video note (doira video)
     if message.video_note:
         return message.video_note.file_id, "video_note"
+    # 5. Audio
     if message.audio:
         return message.audio.file_id, "audio"
+    # 6. Rasm
     if message.photo:
         return message.photo[-1].file_id, "photo"
+    # 7. JSON dan olish — yuklanmagan forward video uchun
+    try:
+        msg_json = message.json
+        if "video" in msg_json:
+            return msg_json["video"]["file_id"], "video"
+        if "document" in msg_json:
+            doc = msg_json["document"]
+            mime = doc.get("mime_type", "")
+            tip = "video" if mime.startswith("video") else "document"
+            return doc["file_id"], tip
+    except:
+        pass
     return None, None
 
-# ─── KINO YUBORISH ───────────────────────────────────────
 def send_kino(chat_id, kino):
+    """Kinoni foydalanuvchiga yuboradi — faqat kino nomi, boshqa narsa yo'q"""
     file_id = kino["file_id"]
     tip = kino.get("tip", "video")
-    caption = f"🎬 {kino['nomi']}\n\n📢 Kanal: {KANAL}"
+    # Faqat kino nomi va kanal — boshqa hech narsa yo'q
+    caption = f"🎬 {kino['nomi']}\n\n📢 {KANAL}"
     try:
         if tip == "document":
             bot.send_document(chat_id, file_id, caption=caption)
@@ -145,9 +156,8 @@ def send_kino(chat_id, kino):
         try:
             bot.send_document(chat_id, file_id, caption=caption)
         except Exception as e:
-            bot.send_message(chat_id, f"❌ Xato yuz berdi: {e}")
+            bot.send_message(chat_id, f"❌ Xato: {e}")
 
-# ─── ADMIN PANEL ─────────────────────────────────────────
 def admin_panel_yuborish(chat_id):
     m = InlineKeyboardMarkup()
     m.row(
@@ -173,7 +183,6 @@ def admin_panel_yuborish(chat_id):
     m.row(InlineKeyboardButton("👥 Adminlar Ro'yxati", callback_data="admin_list"))
     bot.send_message(chat_id, "👑 Admin Panel", reply_markup=m)
 
-# ─── HANDLERLAR ──────────────────────────────────────────
 @bot.message_handler(commands=["start"])
 def start(msg):
     clear_state(msg.from_user.id)
@@ -230,7 +239,6 @@ def universal(msg):
         return
 
     # ── ADMIN STATE MACHINE ──
-
     if state == "kino_kod":
         if msg.text and msg.text.strip().isdigit():
             kod = int(msg.text.strip())
@@ -244,7 +252,7 @@ def universal(msg):
         if txt in ["1", "ha", "Ha", "HA"]:
             set_state(uid, "kino_qism_soni", data)
             bot.send_message(msg.chat.id, "Necha qism?")
-        elif txt in ["2", "yo'q", "Yo'q", "yoq", "Yoq", "YO'Q"]:
+        elif txt in ["2", "yo'q", "Yo'q", "yoq", "Yoq", "YO'Q", "no", "No"]:
             set_state(uid, "kino_nom", {**data, "qism": None})
             bot.send_message(msg.chat.id, "Kino nomini yozing:")
         else:
@@ -261,21 +269,21 @@ def universal(msg):
     elif state == "kino_qismli_nom":
         nomi = msg.text.strip()
         set_state(uid, "kino_qismli_video", {**data, "nomi": nomi})
-        bot.send_message(msg.chat.id, f"✅ Nom saqlandi!\n\n{data['joriy']}-qism videosini yuboring\n(forward qilsa ham bo'ladi, lekin video to'liq yuklanган bo'lsin):")
+        bot.send_message(msg.chat.id, f"✅ Nom saqlandi!\n\n{data['joriy']}-qism videosini yuboring:")
 
     elif state == "kino_nom":
         nomi = msg.text.strip()
         set_state(uid, "kino_video", {**data, "nomi": nomi})
-        bot.send_message(msg.chat.id, "✅ Nom saqlandi!\n\nVideo yuboring\n(forward qilsa ham bo'ladi, lekin video to'liq yuklanган bo'lsin):")
+        bot.send_message(msg.chat.id, "✅ Nom saqlandi!\n\nVideo yuboring:")
 
     elif state == "kino_video":
         file_id, tip = get_file_id(msg)
         if file_id:
             kino_saqlash(data["kod"], data["nomi"], file_id, tip, data.get("qism"))
             clear_state(uid)
-            bot.send_message(msg.chat.id, f"✅ Kino muvaffaqiyatli qo'shildi!\n\n📌 Kod: {data['kod']}\n🎬 Nom: {data['nomi']}\n📁 Tur: {tip}")
+            bot.send_message(msg.chat.id, f"✅ Kino qo'shildi!\n\n📌 Kod: {data['kod']}\n🎬 Nom: {data['nomi']}\n📁 Tur: {tip}")
         else:
-            bot.send_message(msg.chat.id, f"❌ Video topilmadi! (Kelgan tur: {msg.content_type})\n\nVideo, document yoki forward yuboring. Video to'liq yuklanganiga ishonch hosil qiling!")
+            bot.send_message(msg.chat.id, f"❌ Video topilmadi!\nKelgan tur: {msg.content_type}\n\nQaytadan yuboring:")
 
     elif state == "kino_qismli_video":
         file_id, tip = get_file_id(msg)
@@ -290,7 +298,7 @@ def universal(msg):
                 clear_state(uid)
                 bot.send_message(msg.chat.id, f"✅ Barcha {jami} qism saqlandi!\n\n📌 Kod: {data['kod']}\n🎬 Nom: {data['nomi']}")
         else:
-            bot.send_message(msg.chat.id, f"❌ Video topilmadi! (Kelgan tur: {msg.content_type})\n\nVideo to'liq yuklanganiga ishonch hosil qiling!")
+            bot.send_message(msg.chat.id, f"❌ Video topilmadi!\nKelgan tur: {msg.content_type}\n\nQaytadan yuboring:")
 
     elif state == "kino_ochir":
         if msg.text and msg.text.strip().isdigit():
@@ -321,7 +329,7 @@ def universal(msg):
                 return
             bot.send_message(msg.chat.id, "✅ Post kanalga yuborildi!")
         except Exception as e:
-            bot.send_message(msg.chat.id, f"❌ Post yuborishda xato: {e}")
+            bot.send_message(msg.chat.id, f"❌ Xato: {e}")
         clear_state(uid)
 
     elif state == "homiy_qosh":
@@ -335,7 +343,7 @@ def universal(msg):
             bot.send_message(msg.chat.id, f"❌ {kanal} allaqachon mavjud!")
         else:
             homiy_saqlash(kanal)
-            bot.send_message(msg.chat.id, f"✅ {kanal} homiy sifatida qo'shildi!")
+            bot.send_message(msg.chat.id, f"✅ {kanal} qo'shildi!")
         clear_state(uid)
 
     elif state == "homiy_ochir":
@@ -357,12 +365,12 @@ def universal(msg):
             if new_id == ADMIN_ID:
                 bot.send_message(msg.chat.id, "❌ Bu bosh admin!")
             elif adminlar_col.find_one({"user_id": new_id}):
-                bot.send_message(msg.chat.id, "❌ Bu foydalanuvchi allaqachon admin!")
+                bot.send_message(msg.chat.id, "❌ Allaqachon admin!")
             else:
                 adminlar_col.insert_one({"user_id": new_id})
                 bot.send_message(msg.chat.id, f"✅ {new_id} admin qilindi!")
                 try:
-                    bot.send_message(new_id, "🎉 Siz admin qilindingiz!\n/admin buyrug'ini yuboring.")
+                    bot.send_message(new_id, "🎉 Siz admin qilindingiz!\n/admin yuboring.")
                 except:
                     pass
         else:
@@ -387,12 +395,10 @@ def universal(msg):
         clear_state(uid)
         admin_panel_yuborish(msg.chat.id)
 
-# ─── CALLBACK ────────────────────────────────────────────
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     uid = call.from_user.id
 
-    # Qism tanlash
     if call.data.startswith("qism_"):
         parts = call.data.split("_")
         kod = int(parts[1])
@@ -405,7 +411,6 @@ def callback(call):
             bot.send_message(call.message.chat.id, "❌ Kino topilmadi!")
         return
 
-    # Obuna tekshirish
     if call.data == "tekshir":
         if obuna_tekshir(uid):
             m = InlineKeyboardMarkup()
@@ -440,7 +445,6 @@ def callback(call):
                 matn += f"🎬 {kod} — {klist[0]['nomi']} | 👁 {jami}\n"
             else:
                 matn += f"🎬 {kod} — {klist[0]['nomi']} ({len(klist)} qism) | 👁 {jami}\n"
-        # 4096 limit
         for i in range(0, len(matn), 4000):
             bot.send_message(call.message.chat.id, matn[i:i+4000])
 
@@ -450,7 +454,7 @@ def callback(call):
         jami_korishlar = sum(sum(k.get("korishlar", 0) for k in v) for v in kinolar.values())
         matn = (
             f"📊 Bot Statistikasi:\n\n"
-            f"👥 Jami foydalanuvchilar: {len(stat['foydalanuvchilar'])}\n"
+            f"👥 Foydalanuvchilar: {len(stat['foydalanuvchilar'])}\n"
             f"🔍 Kino so'rovlar: {stat['sorovlar']}\n"
             f"🎞 Kinolar soni: {len(kinolar)}\n"
             f"👁 Jami ko'rishlar: {jami_korishlar}\n"
@@ -461,11 +465,11 @@ def callback(call):
 
     elif call.data == "post_yuborish":
         set_state(uid, "post")
-        bot.send_message(call.message.chat.id, "📢 Kanalga yubormoqchi bo'lgan post ni yuboring:\n(matn, rasm yoki video)")
+        bot.send_message(call.message.chat.id, "📢 Kanalga yubormoqchi bo'lgan postni yuboring:")
 
     elif call.data == "homiy_qosh":
         set_state(uid, "homiy_qosh")
-        bot.send_message(call.message.chat.id, "➕ Homiy kanal username ni yozing:\nMisol: @kanal_nomi")
+        bot.send_message(call.message.chat.id, "➕ Homiy kanal username:\nMisol: @kanal_nomi")
 
     elif call.data == "homiy_ochir":
         homiylar = homiylar_yuklash()
@@ -483,8 +487,7 @@ def callback(call):
         if not homiylar:
             bot.send_message(call.message.chat.id, "📭 Homiy yo'q.")
             return
-        matn = "🤝 Homiylar ro'yxati:\n\n"
-        matn += "\n".join(f"{i+1}. {h}" for i, h in enumerate(homiylar))
+        matn = "🤝 Homiylar:\n\n" + "\n".join(f"{i+1}. {h}" for i, h in enumerate(homiylar))
         bot.send_message(call.message.chat.id, matn)
 
     elif call.data == "admin_qosh":
