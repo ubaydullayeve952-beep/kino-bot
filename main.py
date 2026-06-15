@@ -10,9 +10,9 @@ import os
 from datetime import datetime, timedelta
 
 # ======= SOZLAMALAR =======
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "0").split(",")))
+BOT_TOKEN = os.getenv("8606463536:AAHbXjjAgrlaw6BrcWg96fUmy9dXUnrDK3c")
+MONGO_URI = os.getenv("mongodb+srv://admin:ravshan0202@cluster0.8ncigsp.mongodb.net/kinodb?retryWrites=true&w=majority")
+ADMIN_IDS = list(map(int, os.getenv("8965276284", "0").split(",")))
 
 # ======= DATABASE =======
 client = AsyncIOMotorClient(MONGO_URI)
