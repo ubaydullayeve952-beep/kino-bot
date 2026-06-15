@@ -9,9 +9,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 from datetime import datetime, timedelta
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "0").split(",")))
+BOT_TOKEN = os.getenv("8606463536:AAFo9zlioN9CjWWmDkMa0Pf-voJC_EtLk1M")
+MONGO_URI = os.getenv("ravshan0202@cluster0.8ncigsp.mongodb.net")
+ADMIN_IDS = list(map(int, os.getenv("8965276284", "0").split(",")))
 
 client = AsyncIOMotorClient(MONGO_URI)
 db = client["kinobot"]
