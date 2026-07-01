@@ -11,45 +11,45 @@ from aiogram.enums import ParseMode
 
 # --- Railway'da Variables bo'limiga qo'shiladigan sozlamalar ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # sizning Telegram ID'ingiz
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Foydalanuvchilarni eslab turish (statistika uchun, oddiy xotira)
 users = set()
 
 
-async def ask_claude(name: str) -> str:
+async def ask_gemini(name: str) -> str:
     headers = {
-        "x-api-key": CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01",
+        "x-goog-api-key": GEMINI_API_KEY,
         "content-type": "application/json",
     }
     payload = {
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 400,
-        "messages": [
+        "contents": [
             {
                 "role": "user",
-                "content": (
-                    f"'{name}' ismining ma'nosi, kelib chiqishi va xarakteri haqida "
-                    "o'zbek tilida qisqa, chiroyli va iliq uslubda yoz. "
-                    "4-5 gapdan oshmasin. Emoji ishlatsang bo'ladi."
-                ),
+                "parts": [
+                    {
+                        "text": (
+                            f"'{name}' ismining ma'nosi, kelib chiqishi va xarakteri haqida "
+                            "o'zbek tilida qisqa, chiroyli va iliq uslubda yoz. "
+                            "4-5 gapdan oshmasin. Emoji ishlatsang bo'ladi."
+                        )
+                    }
+                ],
             }
-        ],
+        ]
     }
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages", headers=headers, json=payload
-        )
+        resp = await client.post(GEMINI_URL, headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
-        return data["content"][0]["text"]
+        return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
 @dp.message(Command("start"))
@@ -81,7 +81,7 @@ async def name_handler(message: Message):
 
     thinking_msg = await message.answer("🔎 Qidiryapman...")
     try:
-        meaning = await ask_claude(name)
+        meaning = await ask_gemini(name)
         await thinking_msg.edit_text(f"✨ <b>{name}</b>\n\n{meaning}")
     except Exception as e:
         logging.error(f"Xatolik: {e}")
@@ -95,4 +95,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())
