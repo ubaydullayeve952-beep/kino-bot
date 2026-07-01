@@ -1,3 +1,2 @@
-pyTelegramBotAPI
-pymongo
-dnspython
+aiogram==3.13.1
+httpx==0.27.2
