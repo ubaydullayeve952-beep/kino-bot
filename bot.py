@@ -1,218 +1,332 @@
 import os
-import logging
+import json
 import asyncio
+import logging
 import httpx
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode, ChatMemberStatus
+from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+MAIN_BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+DATA_FILE = "bots_data.json"
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher(storage=MemoryStorage())
+main_bot = Bot(token=MAIN_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+main_dp = Dispatcher(storage=MemoryStorage())
 
-users = set()
-channels = {}  # {chat_id: {"username": "@xxx", "title": "..."}}
+BOT_TYPES = {
+    "kino": "🎬 Kino bot",
+    "quiz": "🧠 Viktorina bot",
+    "shop": "🛒 Buyurtma bot",
+    "ai": "🤖 AI-yordamchi bot",
+    "post": "📢 E'lon/Xabar bot",
+}
 
-
-class AddChannel(StatesGroup):
-    waiting_username = State()
-
-
-def admin_panel_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="admin_add")],
-        [InlineKeyboardButton(text="📋 Kanallar ro'yxati", callback_data="admin_list")],
-        [InlineKeyboardButton(text="➖ Kanal o'chirish", callback_data="admin_remove")],
-    ])
+running_bots = {}  # token -> asyncio task
 
 
+# ---------- Ma'lumotlarni saqlash ----------
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"bots": {}}
+
+
+def save_data():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+data = load_data()
+
+
+# ---------- Gemini yordamchisi ----------
 async def ask_gemini(prompt: str) -> str:
-    headers = {
-        "x-goog-api-key": GEMINI_API_KEY,
-        "content-type": "application/json",
-    }
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "content-type": "application/json"}
     payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(GEMINI_URL, headers=headers, json=payload)
         resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        result = resp.json()
+        return result["candidates"][0]["content"]["parts"][0]["text"]
 
 
-async def missing_subscriptions(user_id: int):
-    missing = []
-    for chat_id, info in channels.items():
-        try:
-            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
-                missing.append(info)
-        except Exception as e:
-            logging.error(f"Obuna tekshirishda xato ({chat_id}): {e}")
-    return missing
+# ---------- Bosh (creator) bot ----------
+class NewBotFlow(StatesGroup):
+    waiting_token = State()
 
 
-def subscribe_kb(missing):
-    buttons = [[InlineKeyboardButton(text=info["title"], url=f"https://t.me/{info['username'].lstrip('@')}")] for info in missing]
-    buttons.append([InlineKeyboardButton(text="✅ Obuna bo'ldim", callback_data="check_sub")])
+def types_kb():
+    buttons = [[InlineKeyboardButton(text=name, callback_data=f"type_{key}")] for key, name in BOT_TYPES.items()]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-@dp.message(Command("start"))
-async def start_handler(message: Message):
-    users.add(message.from_user.id)
+@main_dp.message(Command("start"))
+async def main_start(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("Bu bot faqat egasi uchun mo'ljallangan.")
+        return
     await message.answer(
-        "Assalomu alaykum! 👋\n\n"
-        "Men ism ma'nosini aytib beruvchi botman.\n"
-        "Menga istalgan ismni yuboring — men uning ma'nosini aytib beraman.\n\n"
-        "Masalan: <b>Ravshan</b>"
+        "🤖 <b>Bot yaratuvchi botga xush kelibsiz!</b>\n\n"
+        "Yangi bot yaratish uchun /newbot buyrug'ini yuboring.\n"
+        "Mavjud botlaringizni ko'rish uchun /mybots."
     )
 
 
-@dp.message(Command("admin"))
-async def admin_handler(message: Message):
+@main_dp.message(Command("newbot"))
+async def newbot_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer("🛠 Admin panel", reply_markup=admin_panel_kb())
-
-
-@dp.callback_query(F.data == "admin_add")
-async def admin_add_cb(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        return
-    await callback.message.answer(
-        "Kanal usernameni yuboring (masalan: @mening_kanalim).\n"
-        "⚠️ Bot o'sha kanalda ADMIN bo'lishi shart!"
+    await message.answer(
+        "Yangi bot tokenini yuboring.\n"
+        "(@BotFather orqali /newbot bilan yaratib, tokenni shu yerga joylashtiring)"
     )
-    await state.set_state(AddChannel.waiting_username)
-    await callback.answer()
+    await state.set_state(NewBotFlow.waiting_token)
 
 
-@dp.callback_query(F.data == "admin_list")
-async def admin_list_cb(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        return
-    if not channels:
-        await callback.message.answer("Hozircha kanallar yo'q.")
-    else:
-        text = "📋 Majburiy obuna kanallari:\n\n" + "\n".join(
-            f"• {info['title']} ({info['username']})" for info in channels.values()
-        )
-        await callback.message.answer(text)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin_remove")
-async def admin_remove_cb(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        return
-    if not channels:
-        await callback.message.answer("O'chirish uchun kanal yo'q.")
-        await callback.answer()
-        return
-    buttons = [[InlineKeyboardButton(text=info["title"], callback_data=f"remove_{chat_id}")] for chat_id, info in channels.items()]
-    await callback.message.answer("O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("remove_"))
-async def remove_channel_cb(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        return
-    chat_id = int(callback.data.split("_", 1)[1])
-    removed = channels.pop(chat_id, None)
-    if removed:
-        await callback.message.answer(f"🗑 O'chirildi: {removed['title']}")
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "check_sub")
-async def check_sub_cb(callback: CallbackQuery):
-    missing = await missing_subscriptions(callback.from_user.id)
-    if missing:
-        await callback.answer("Hali barcha kanallarga obuna bo'lmagansiz ❌", show_alert=True)
-    else:
-        await callback.message.edit_text("✅ Rahmat! Endi ism yuborishingiz mumkin.")
-        await callback.answer()
-
-
-@dp.message(Command("stats"))
-async def stats_handler(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    await message.answer(f"👥 Foydalanuvchilar soni: {len(users)}")
-
-
-@dp.message(AddChannel.waiting_username)
-async def admin_add_process(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    username = message.text.strip()
+@main_dp.message(NewBotFlow.waiting_token)
+async def newbot_token(message: Message, state: FSMContext):
+    token = message.text.strip()
     try:
-        chat = await bot.get_chat(username)
-        channels[chat.id] = {"username": username, "title": chat.title}
-        await message.answer(f"✅ Qo'shildi: {chat.title}")
-    except Exception as e:
-        await message.answer(f"❌ Xatolik: kanal topilmadi yoki bot u yerda admin emas.\n{e}")
+        test_bot = Bot(token=token)
+        me = await test_bot.get_me()
+        await test_bot.session.close()
+    except Exception:
+        await message.answer("❌ Token noto'g'ri. Qaytadan yuboring.")
+        return
+
+    await state.update_data(token=token, bot_name=me.first_name)
+    await message.answer(f"✅ Bot topildi: <b>{me.first_name}</b>\n\nEndi turini tanlang:", reply_markup=types_kb())
+
+
+@main_dp.callback_query(F.data.startswith("type_"))
+async def newbot_type(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    bot_type = callback.data.split("_", 1)[1]
+    state_data = await state.get_data()
+    token = state_data.get("token")
+    bot_name = state_data.get("bot_name")
+
+    if not token:
+        await callback.answer("Xatolik: token topilmadi, qaytadan /newbot bosing.", show_alert=True)
+        return
+
+    data["bots"][token] = {"type": bot_type, "name": bot_name, "movies": {}, "users": []}
+    save_data()
+
+    await start_child_bot(token, bot_type)
+
+    await callback.message.edit_text(f"✅ {BOT_TYPES[bot_type]} ishga tushdi: <b>{bot_name}</b>")
     await state.clear()
+    await callback.answer()
 
 
-@dp.message(F.text)
-async def name_handler(message: Message):
-    users.add(message.from_user.id)
+@main_dp.message(Command("mybots"))
+async def mybots(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not data["bots"]:
+        await message.answer("Hali botlar yo'q. /newbot orqali yarating.")
+        return
+    text = "🤖 <b>Sizning botlaringiz:</b>\n\n"
+    for token, info in data["bots"].items():
+        status = "🟢" if token in running_bots else "🔴"
+        text += f"{status} {info['name']} — {BOT_TYPES.get(info['type'], info['type'])}\n"
+    await message.answer(text)
 
-    # Admin uchun: erkin sun'iy intellekt suhbati
-    if message.from_user.id == ADMIN_ID:
-        thinking_msg = await message.answer("🤖 O'ylayapman...")
+
+# ---------- Kino bot ----------
+def setup_kino_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+
+    @dp.message(Command("start"))
+    async def kstart(message: Message):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        await message.answer("🎬 Film kodini yuboring, men uni topib beraman.")
+
+    @dp.message(F.video)
+    async def save_movie(message: Message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        code = (message.caption or "").strip()
+        if not code:
+            await message.answer("❌ Video caption'iga kod yozing (masalan: 101)")
+            return
+        info["movies"][code] = message.video.file_id
+        save_data()
+        await message.answer(f"✅ Kod {code} bilan saqlandi.")
+
+    @dp.message(F.text)
+    async def get_movie(message: Message):
+        code = message.text.strip()
+        file_id = info["movies"].get(code)
+        if file_id:
+            await message.answer_video(file_id, caption=f"🎬 Kod: {code}")
+        else:
+            await message.answer("❌ Bunday kodli film topilmadi.")
+
+
+# ---------- Viktorina bot ----------
+QUIZ_QUESTIONS = [
+    {"q": "O'zbekiston poytaxti?", "options": ["Samarqand", "Toshkent", "Buxoro"], "correct": 1},
+    {"q": "2 + 2 nechiga teng?", "options": ["3", "4", "5"], "correct": 1},
+    {"q": "Eng katta okean?", "options": ["Tinch okean", "Atlantika", "Hind okeani"], "correct": 0},
+]
+
+
+def setup_quiz_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+
+    async def send_question(message: Message, idx: int):
+        if idx >= len(QUIZ_QUESTIONS):
+            await message.answer("🎉 Test tugadi! Qaytadan boshlash uchun /start bosing.")
+            return
+        q = QUIZ_QUESTIONS[idx]
+        buttons = [[InlineKeyboardButton(text=opt, callback_data=f"quiz_{idx}_{i}")] for i, opt in enumerate(q["options"])]
+        await message.answer(q["q"], reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    @dp.message(Command("start"))
+    async def qstart(message: Message):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        await send_question(message, 0)
+
+    @dp.callback_query(F.data.startswith("quiz_"))
+    async def quiz_answer(callback: CallbackQuery):
+        _, idx, choice = callback.data.split("_")
+        idx, choice = int(idx), int(choice)
+        correct = QUIZ_QUESTIONS[idx]["correct"]
+        await callback.answer("✅ To'g'ri!" if choice == correct else "❌ Noto'g'ri!")
+        await send_question(callback.message, idx + 1)
+
+
+# ---------- Buyurtma bot ----------
+def setup_shop_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+
+    @dp.message(Command("start"))
+    async def sstart(message: Message):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        await message.answer(
+            "🛒 Buyurtma botiga xush kelibsiz!\n\nBuyurtma bermoqchi bo'lgan mahsulot nomini yozing."
+        )
+
+    @dp.message(F.text)
+    async def order(message: Message):
+        username = message.from_user.username or message.from_user.id
+        await main_bot.send_message(
+            ADMIN_ID,
+            f"🛒 <b>Yangi buyurtma!</b>\nBot: {info['name']}\n"
+            f"Foydalanuvchi: @{username}\nXabar: {message.text}",
+        )
+        await message.answer("✅ Buyurtmangiz qabul qilindi!")
+
+
+# ---------- AI-yordamchi bot ----------
+def setup_ai_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+
+    @dp.message(Command("start"))
+    async def astart(message: Message):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        await message.answer("🤖 Menga istalgan savolni yozing!")
+
+    @dp.message(F.text)
+    async def ai_chat(message: Message):
+        thinking = await message.answer("💭 O'ylayapman...")
         try:
             answer = await ask_gemini(message.text)
-            await thinking_msg.edit_text(answer)
+            await thinking.edit_text(answer)
         except Exception as e:
             logging.error(f"Xatolik: {e}")
-            await thinking_msg.edit_text("Xatolik yuz berdi.")
-        return
+            await thinking.edit_text("Xatolik yuz berdi.")
 
-    # Oddiy foydalanuvchilar uchun: majburiy obuna tekshiruvi
-    missing = await missing_subscriptions(message.from_user.id)
-    if missing:
-        await message.answer(
-            "Botdan foydalanish uchun quyidagi kanal(lar)ga obuna bo'ling:",
-            reply_markup=subscribe_kb(missing),
-        )
-        return
 
-    name = message.text.strip()
-    if len(name) > 30 or not name.replace(" ", "").isalpha():
-        await message.answer("Iltimos, faqat ism yuboring 🙂")
-        return
+# ---------- E'lon/Xabar bot ----------
+class PostFlow(StatesGroup):
+    waiting_text = State()
 
-    thinking_msg = await message.answer("🔎 Qidiryapman...")
-    try:
-        meaning = await ask_gemini(
-            f"'{name}' ismining ma'nosi, kelib chiqishi va xarakteri haqida "
-            "o'zbek tilida qisqa, chiroyli va iliq uslubda yoz. "
-            "4-5 gapdan oshmasin. Emoji ishlatsang bo'ladi."
-        )
-        await thinking_msg.edit_text(f"✨ <b>{name}</b>\n\n{meaning}")
-    except Exception as e:
-        logging.error(f"Xatolik: {e}")
-        await thinking_msg.edit_text("Kechirasiz, xatolik yuz berdi. Birozdan keyin qayta urinib ko'ring.")
+
+def setup_post_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+
+    @dp.message(Command("start"))
+    async def pstart(message: Message):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        await message.answer("📢 Yangiliklarga obuna bo'ldingiz!")
+
+    @dp.message(Command("post"))
+    async def post_cmd(message: Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            return
+        await message.answer("E'lon matnini yuboring, u barcha obunachilarga yuboriladi.")
+        await state.set_state(PostFlow.waiting_text)
+
+    @dp.message(PostFlow.waiting_text)
+    async def post_send(message: Message, state: FSMContext):
+        count = 0
+        for uid in info["users"]:
+            try:
+                await message.bot.send_message(uid, message.text)
+                count += 1
+            except Exception:
+                pass
+        await message.answer(f"✅ {count} ta foydalanuvchiga yuborildi.")
+        await state.clear()
+
+
+SETUP_FUNCTIONS = {
+    "kino": setup_kino_bot,
+    "quiz": setup_quiz_bot,
+    "shop": setup_shop_bot,
+    "ai": setup_ai_bot,
+    "post": setup_post_bot,
+}
+
+
+async def start_child_bot(token: str, bot_type: str):
+    if token in running_bots:
+        return
+    child_bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    child_dp = Dispatcher(storage=MemoryStorage())
+    SETUP_FUNCTIONS[bot_type](child_dp, token)
+    task = asyncio.create_task(child_dp.start_polling(child_bot))
+    running_bots[token] = task
 
 
 async def main():
-    await dp.start_polling(bot)
+    # Avval saqlangan botlarni qayta ishga tushiramiz
+    for token, info in data["bots"].items():
+        await start_child_bot(token, info["type"])
+
+    await main_dp.start_polling(main_bot)
 
 
 if __name__ == "__main__":
