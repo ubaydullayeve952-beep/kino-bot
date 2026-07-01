@@ -73,10 +73,17 @@ def types_kb():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+@main_dp.message(Command("myid"))
+async def myid_handler(message: Message):
+    await message.answer(f"Sizning Telegram ID'ingiz: <code>{message.from_user.id}</code>")
+
+
 @main_dp.message(Command("start"))
 async def main_start(message: Message):
     if message.from_user.id != ADMIN_ID:
-        await message.answer("Bu bot faqat egasi uchun mo'ljallangan.")
+        await message.answer(
+            "👋 Assalomu alaykum!\n\nBu — bot yaratuvchi tizim. Hozircha bu yerda siz uchun maxsus funksiya yo'q."
+        )
         return
     await message.answer(
         "🤖 <b>Bot yaratuvchi botga xush kelibsiz!</b>\n\n"
