@@ -3,22 +3,24 @@ import json
 import asyncio
 import logging
 import httpx
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatMemberStatus
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 MAIN_BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # bosh administrator (siz)
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 DATA_FILE = "bots_data.json"
+TRIAL_DAYS = 7
 
 logging.basicConfig(level=logging.INFO)
 
@@ -32,15 +34,21 @@ BOT_TYPES = {
     "post": "📢 E'lon/Xabar bot",
 }
 
-running_bots = {}  # token -> asyncio task
+PRICES = {
+    "kino": 150_000,
+    "ai": 100_000,
+    "shop": 250_000,
+    "post": 100_000,
+}
+
+running_bots = {}
 
 
-# ---------- Ma'lumotlarni saqlash ----------
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"bots": {}}
+    return {"bots": {}, "next_bot_id": 1}
 
 
 def save_data():
@@ -49,9 +57,16 @@ def save_data():
 
 
 data = load_data()
+data.setdefault("next_bot_id", 1)
 
 
-# ---------- Gemini yordamchisi ----------
+def is_active(info: dict) -> bool:
+    if info.get("paid"):
+        return True
+    created = datetime.fromisoformat(info["created_at"])
+    return datetime.now() < created + timedelta(days=TRIAL_DAYS)
+
+
 async def ask_gemini(prompt: str) -> str:
     headers = {"x-goog-api-key": GEMINI_API_KEY, "content-type": "application/json"}
     payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
@@ -65,11 +80,11 @@ async def ask_gemini(prompt: str) -> str:
 # ---------- Holatlar (FSM) ----------
 class NewBotFlow(StatesGroup):
     waiting_token = State()
-    waiting_admin = State()
 
 
 class AddMovie(StatesGroup):
     waiting_code = State()
+    waiting_desc = State()
     waiting_video = State()
 
 
@@ -79,14 +94,173 @@ class AddProduct(StatesGroup):
     waiting_qty = State()
 
 
+class Checkout(StatesGroup):
+    waiting_address = State()
+    waiting_phone = State()
+
+
 class PostFlow(StatesGroup):
     waiting_text = State()
     waiting_confirm = State()
 
 
-# ---------- Bosh (creator) bot ----------
+class AddChannel(StatesGroup):
+    waiting_username = State()
+
+
+# ---------- Majburiy obuna (barcha botlar uchun umumiy) ----------
+def channels_admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="ch_add")],
+        [InlineKeyboardButton(text="📋 Kanallar ro'yxati", callback_data="ch_list")],
+        [InlineKeyboardButton(text="➖ Kanal o'chirish", callback_data="ch_del")],
+    ])
+
+
+async def get_missing_channels(bot: Bot, channels: dict, user_id: int):
+    missing = []
+    for chat_id, info in channels.items():
+        try:
+            member = await bot.get_chat_member(chat_id=int(chat_id), user_id=user_id)
+            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+                missing.append(info)
+        except Exception as e:
+            logging.error(f"Obuna tekshirishda xato ({chat_id}): {e}")
+    return missing
+
+
+def subscribe_kb(missing):
+    buttons = [[InlineKeyboardButton(text=info["title"], url=f"https://t.me/{info['username'].lstrip('@')}")] for info in missing]
+    buttons.append([InlineKeyboardButton(text="✅ Obuna bo'ldim", callback_data="check_sub")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def require_subscription(event, info: dict, admin_id: int) -> bool:
+    uid = event.from_user.id
+    if uid == admin_id:
+        return True
+    channels = info.get("channels", {})
+    if not channels:
+        return True
+    missing = await get_missing_channels(event.bot, channels, uid)
+    if missing:
+        kb = subscribe_kb(missing)
+        text = "Botdan foydalanish uchun quyidagi kanal(lar)ga obuna bo'ling:"
+        if isinstance(event, CallbackQuery):
+            await event.message.answer(text, reply_markup=kb)
+            await event.answer()
+        else:
+            await event.answer(text, reply_markup=kb)
+        return False
+    return True
+
+
+async def check_active(event, info: dict, admin_id: int) -> bool:
+    """True bo'lsa - bot ishlaydi. False bo'lsa - sinov tugagan / to'lanmagan."""
+    if is_active(info):
+        return True
+    uid = event.from_user.id
+    price = PRICES.get(info["type"], 0)
+    if uid == admin_id:
+        text = (
+            f"⏳ <b>Bepul sinov muddati tugadi.</b>\n\n"
+            f"Ushbu bot ({BOT_TYPES.get(info['type'])}) narxi: <b>{price:,} so'm/oy</b>.\n\n"
+            "To'lovni amalga oshirish uchun platforma administratoriga murojaat qiling."
+        )
+    else:
+        text = "🚧 Bot vaqtincha ishlamayapti."
+    if isinstance(event, CallbackQuery):
+        await event.message.answer(text)
+        await event.answer()
+    else:
+        await event.answer(text)
+    return False
+
+
+def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
+    info = data["bots"][token]
+    info.setdefault("channels", {})
+
+    @dp.callback_query(F.data == "ch_add")
+    async def ch_add_cb(callback: CallbackQuery, state: FSMContext):
+        if callback.from_user.id != admin_id:
+            return
+        await callback.message.answer(
+            "Kanal usernameni yuboring (masalan: @mening_kanalim).\n"
+            "⚠️ Bot o'sha kanalda ADMIN bo'lishi shart!"
+        )
+        await state.set_state(AddChannel.waiting_username)
+        await callback.answer()
+
+    @dp.message(AddChannel.waiting_username)
+    async def ch_add_process(message: Message, state: FSMContext):
+        if message.from_user.id != admin_id:
+            return
+        username = message.text.strip()
+        try:
+            chat = await message.bot.get_chat(username)
+            info["channels"][str(chat.id)] = {"username": username, "title": chat.title}
+            save_data()
+            await message.answer(f"✅ Qo'shildi: {chat.title}")
+        except Exception as e:
+            await message.answer(f"❌ Xatolik: kanal topilmadi yoki bot u yerda admin emas.\n{e}")
+        await state.clear()
+
+    @dp.callback_query(F.data == "ch_list")
+    async def ch_list_cb(callback: CallbackQuery):
+        if callback.from_user.id != admin_id:
+            return
+        if not info["channels"]:
+            await callback.message.answer("Hozircha majburiy kanallar yo'q.")
+        else:
+            text = "📋 Majburiy obuna kanallari:\n\n" + "\n".join(
+                f"• {c['title']} ({c['username']})" for c in info["channels"].values()
+            )
+            await callback.message.answer(text)
+        await callback.answer()
+
+    @dp.callback_query(F.data == "ch_del")
+    async def ch_del_cb(callback: CallbackQuery):
+        if callback.from_user.id != admin_id:
+            return
+        if not info["channels"]:
+            await callback.message.answer("O'chirish uchun kanal yo'q.")
+            await callback.answer()
+            return
+        buttons = [[InlineKeyboardButton(text=c["title"], callback_data=f"chdel_{cid}")] for cid, c in info["channels"].items()]
+        await callback.message.answer("O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("chdel_"))
+    async def ch_delid_cb(callback: CallbackQuery):
+        if callback.from_user.id != admin_id:
+            return
+        cid = callback.data.split("_", 1)[1]
+        removed = info["channels"].pop(cid, None)
+        save_data()
+        if removed:
+            await callback.message.answer(f"🗑 O'chirildi: {removed['title']}")
+        await callback.answer()
+
+    @dp.callback_query(F.data == "check_sub")
+    async def check_sub_cb(callback: CallbackQuery):
+        missing = await get_missing_channels(callback.bot, info["channels"], callback.from_user.id)
+        if missing:
+            await callback.answer("Hali barcha kanallarga obuna bo'lmagansiz ❌", show_alert=True)
+        else:
+            await callback.message.edit_text("✅ Rahmat! Endi /start bosib davom eting.")
+            await callback.answer()
+
+    @dp.message(Command("channels"))
+    async def channels_panel(message: Message):
+        if message.from_user.id != admin_id:
+            return
+        await message.answer("📡 Majburiy obuna boshqaruvi:", reply_markup=channels_admin_kb())
+
+
+# ---------- Bosh (creator) bot — XALQ UCHUN OMMAVIY ----------
 def types_kb():
-    buttons = [[InlineKeyboardButton(text=name, callback_data=f"type_{key}")] for key, name in BOT_TYPES.items()]
+    buttons = [[InlineKeyboardButton(text=f"{name} — {PRICES[key]:,} so'm/oy", callback_data=f"type_{key}")] for key, name in BOT_TYPES.items()]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -97,20 +271,23 @@ async def myid_handler(message: Message):
 
 @main_dp.message(Command("start"))
 async def main_start(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("Bu bot faqat egasi uchun mo'ljallangan.")
-        return
-    await message.answer(
-        "🤖 <b>Bot yaratuvchi botga xush kelibsiz!</b>\n\n"
-        "Yangi bot yaratish uchun /newbot buyrug'ini yuboring.\n"
-        "Mavjud botlaringizni ko'rish uchun /mybots."
+    text = (
+        "🤖 <b>Bot yaratuvchi platformaga xush kelibsiz!</b>\n\n"
+        "Bu yerda bir necha daqiqada o'zingizga kerakli botni yaratishingiz mumkin.\n\n"
+        "💳 <b>Narxlar (oyiga):</b>\n"
+        f"🎬 Kino bot — {PRICES['kino']:,} so'm\n"
+        f"🤖 AI-yordamchi bot — {PRICES['ai']:,} so'm\n"
+        f"🛒 Savdo bot — {PRICES['shop']:,} so'm\n"
+        f"📢 E'lon/Xabar bot — {PRICES['post']:,} so'm\n\n"
+        f"🎁 Har bir bot uchun {TRIAL_DAYS} kunlik BEPUL sinov muddati bor!\n\n"
+        "Bot yaratish: /newbot\n"
+        "Botlaringiz: /mybots"
     )
+    await message.answer(text)
 
 
 @main_dp.message(Command("newbot"))
 async def newbot_start(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
     await message.answer(
         "Yangi bot tokenini yuboring.\n"
         "(@BotFather orqali /newbot bilan yaratib, tokenni shu yerga joylashtiring)"
@@ -130,55 +307,46 @@ async def newbot_token(message: Message, state: FSMContext):
         return
 
     await state.update_data(token=token, bot_name=me.first_name)
-    await message.answer(
-        f"✅ Bot topildi: <b>{me.first_name}</b>\n\n"
-        "Endi shu botning egasi (admin) bo'ladigan Telegram ID'ni yuboring.\n"
-        "(O'zingizning ID'ingizni bilish uchun /myid dan foydalanishingiz mumkin)"
-    )
-    await state.set_state(NewBotFlow.waiting_admin)
-
-
-@main_dp.message(NewBotFlow.waiting_admin)
-async def newbot_admin(message: Message, state: FSMContext):
-    try:
-        admin_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Faqat raqam kiriting.")
-        return
-    await state.update_data(admin_id=admin_id)
-    await message.answer("Endi bot turini tanlang:", reply_markup=types_kb())
+    await message.answer(f"✅ Bot topildi: <b>{me.first_name}</b>\n\nEndi bot turini tanlang:", reply_markup=types_kb())
 
 
 @main_dp.callback_query(F.data.startswith("type_"))
 async def newbot_type(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        return
     bot_type = callback.data.split("_", 1)[1]
     state_data = await state.get_data()
     token = state_data.get("token")
     bot_name = state_data.get("bot_name")
-    admin_id = state_data.get("admin_id")
 
-    if not token or admin_id is None:
+    if not token:
         await callback.answer("Xatolik: qaytadan /newbot bosing.", show_alert=True)
         return
 
+    bot_id = data["next_bot_id"]
+    data["next_bot_id"] += 1
+
     data["bots"][token] = {
+        "id": bot_id,
         "type": bot_type,
         "name": bot_name,
-        "admin_id": admin_id,
+        "admin_id": callback.from_user.id,
+        "created_at": datetime.now().isoformat(),
+        "paid": False,
         "movies": {},
         "products": {},
         "next_id": 1,
         "carts": {},
+        "channels": {},
         "users": [],
+        "stats": {},
     }
     save_data()
 
     await start_child_bot(token, bot_type)
 
     await callback.message.edit_text(
-        f"✅ {BOT_TYPES[bot_type]} ishga tushdi: <b>{bot_name}</b>\nAdmin ID: {admin_id}"
+        f"✅ {BOT_TYPES[bot_type]} ishga tushdi: <b>{bot_name}</b>\n\n"
+        f"🎁 {TRIAL_DAYS} kunlik bepul sinov boshlandi!\n"
+        "Majburiy obuna qo'shish uchun o'sha botga /channels yozing."
     )
     await state.clear()
     await callback.answer()
@@ -186,22 +354,50 @@ async def newbot_type(callback: CallbackQuery, state: FSMContext):
 
 @main_dp.message(Command("mybots"))
 async def mybots(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    uid = message.from_user.id
+    if uid == ADMIN_ID:
+        items = list(data["bots"].items())
+    else:
+        items = [(t, i) for t, i in data["bots"].items() if i["admin_id"] == uid]
+
+    if not items:
+        await message.answer("Hali botlaringiz yo'q. /newbot orqali yarating.")
         return
-    if not data["bots"]:
-        await message.answer("Hali botlar yo'q. /newbot orqali yarating.")
+
+    for token, info in items:
+        status = "🟢 Faol" if is_active(info) else "🔴 Sinov tugagan"
+        paid_note = " (to'langan)" if info.get("paid") else ""
+        text = f"{BOT_TYPES.get(info['type'])}: <b>{info['name']}</b>\n{status}{paid_note}"
+        if uid == ADMIN_ID and info["admin_id"] != ADMIN_ID:
+            text += f"\n👤 Egasi ID: {info['admin_id']}"
+        kb = None
+        if uid == ADMIN_ID and not info.get("paid"):
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ To'lovni tasdiqlash", callback_data=f"activate_{info['id']}")]
+            ])
+        await message.answer(text, reply_markup=kb)
+
+
+@main_dp.callback_query(F.data.startswith("activate_"))
+async def activate_cb(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
         return
-    text = "🤖 <b>Sizning botlaringiz:</b>\n\n"
+    bot_id = int(callback.data.split("_", 1)[1])
     for token, info in data["bots"].items():
-        status = "🟢" if token in running_bots else "🔴"
-        text += f"{status} {info['name']} — {BOT_TYPES.get(info['type'], info['type'])} (admin: {info['admin_id']})\n"
-    await message.answer(text)
+        if info.get("id") == bot_id:
+            info["paid"] = True
+            save_data()
+            await callback.message.answer(f"✅ {info['name']} bot faollashtirildi.")
+            break
+    await callback.answer()
 
 
 # ---------- Kino bot ----------
 def setup_kino_bot(dp: Dispatcher, token: str):
     info = data["bots"][token]
     admin_id = info["admin_id"]
+    info["stats"].setdefault("requests", 0)
+    setup_subscription_handlers(dp, token, admin_id)
 
     @dp.message(Command("start"))
     async def kstart(message: Message):
@@ -209,34 +405,59 @@ def setup_kino_bot(dp: Dispatcher, token: str):
         if uid not in info["users"]:
             info["users"].append(uid)
             save_data()
+        if not await check_active(message, info, admin_id):
+            return
         if uid == admin_id:
             await message.answer(
                 "🎬 <b>Kino bot boshqaruvi</b>\n\n"
-                "Yangi film qo'shish uchun: /addmovie\n"
+                "Yangi film qo'shish: /addmovie\n"
+                "Statistika: /stats\n"
+                "Majburiy obuna: /channels\n\n"
                 "Foydalanuvchilar film kodini yuborsa, filmni topib beraman."
             )
         else:
             await message.answer("🎬 Film kodini yuboring, men uni topib beraman.")
 
+    @dp.message(Command("stats"))
+    async def kino_stats(message: Message):
+        if message.from_user.id != admin_id:
+            return
+        await message.answer(
+            f"📊 <b>Statistika</b>\n\n"
+            f"👥 Foydalanuvchilar: {len(info['users'])}\n"
+            f"🔍 Kino so'rovlari: {info['stats']['requests']}\n"
+            f"🎞 Saqlangan filmlar: {len(info['movies'])}"
+        )
+
     @dp.message(Command("addmovie"))
     async def addmovie_cmd(message: Message, state: FSMContext):
         if message.from_user.id != admin_id:
             return
-        await message.answer("Kino kodini yuboring (masalan: 040):")
+        await message.answer("Kino kodini yuboring (faqat raqam, masalan: 40):")
         await state.set_state(AddMovie.waiting_code)
 
     @dp.message(AddMovie.waiting_code)
     async def addmovie_code(message: Message, state: FSMContext):
         code = message.text.strip()
+        if not code.isdigit():
+            await message.answer("❌ Kod faqat raqamlardan iborat bo'lishi kerak. Qaytadan yuboring:")
+            return
         await state.update_data(code=code)
-        await message.answer(f"Endi <b>{code}</b> kodli filmni (videoni) yuboring:")
+        await message.answer("Endi kino haqida qisqacha tavsif yozing (janr, yil, va h.k.):")
+        await state.set_state(AddMovie.waiting_desc)
+
+    @dp.message(AddMovie.waiting_desc)
+    async def addmovie_desc(message: Message, state: FSMContext):
+        await state.update_data(desc=message.text.strip())
+        await message.answer("Endi filmni (videoni) yuboring:")
         await state.set_state(AddMovie.waiting_video)
 
     @dp.message(AddMovie.waiting_video, F.video)
     async def addmovie_video(message: Message, state: FSMContext):
         state_data = await state.get_data()
         code = state_data.get("code")
-        info["movies"][code] = message.video.file_id
+        desc = state_data.get("desc", "")
+        info["movies"][code] = {"file_id": message.video.file_id, "desc": desc}
         save_data()
         await message.answer(f"✅ Kod <b>{code}</b> bilan film saqlandi.")
         await state.clear()
@@ -247,10 +468,19 @@ def setup_kino_bot(dp: Dispatcher, token: str):
 
     @dp.message(F.text)
     async def get_movie(message: Message):
+        if not await check_active(message, info, admin_id):
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
         code = message.text.strip()
-        file_id = info["movies"].get(code)
-        if file_id:
-            await message.answer_video(file_id, caption=f"🎬 Kod: {code}")
+        info["stats"]["requests"] += 1
+        save_data()
+        movie = info["movies"].get(code)
+        if movie:
+            caption = f"🎬 Kod: {code}"
+            if movie.get("desc"):
+                caption += f"\n\n{movie['desc']}"
+            await message.answer_video(movie["file_id"], caption=caption)
         else:
             await message.answer("❌ Bunday kodli film topilmadi.")
 
@@ -259,6 +489,9 @@ def setup_kino_bot(dp: Dispatcher, token: str):
 def setup_shop_bot(dp: Dispatcher, token: str):
     info = data["bots"][token]
     admin_id = info["admin_id"]
+    info["stats"].setdefault("orders", 0)
+    info["stats"].setdefault("revenue", 0)
+    setup_subscription_handlers(dp, token, admin_id)
 
     def admin_kb():
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -281,12 +514,28 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         if uid not in info["users"]:
             info["users"].append(uid)
             save_data()
+        if not await check_active(message, info, admin_id):
+            return
         if uid == admin_id:
-            await message.answer("🛒 <b>Savdo bot boshqaruvi</b>", reply_markup=admin_kb())
-        elif not info["products"]:
+            await message.answer("🛒 <b>Savdo bot boshqaruvi</b>\n\nStatistika: /stats\nMajburiy obuna: /channels", reply_markup=admin_kb())
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        if not info["products"]:
             await message.answer("Hozircha mahsulotlar yo'q.")
         else:
             await message.answer("🛍 Mahsulotlar:", reply_markup=catalog_kb())
+
+    @dp.message(Command("stats"))
+    async def shop_stats(message: Message):
+        if message.from_user.id != admin_id:
+            return
+        await message.answer(
+            f"📊 <b>Statistika</b>\n\n"
+            f"👥 Foydalanuvchilar: {len(info['users'])}\n"
+            f"🧾 Buyurtmalar: {info['stats']['orders']}\n"
+            f"💰 Jami tushum: {info['stats']['revenue']:,} so'm"
+        )
 
     @dp.callback_query(F.data == "padd")
     async def padd_cb(callback: CallbackQuery, state: FSMContext):
@@ -366,6 +615,10 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
     @dp.callback_query(F.data.startswith("buy_"))
     async def buy_cb(callback: CallbackQuery):
+        if not await check_active(callback, info, admin_id):
+            return
+        if not await require_subscription(callback, info, admin_id):
+            return
         pid = callback.data.split("_", 1)[1]
         uid = str(callback.from_user.id)
         product = info["products"].get(pid)
@@ -412,12 +665,30 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         await callback.answer()
 
     @dp.callback_query(F.data == "checkout")
-    async def checkout_cb(callback: CallbackQuery):
+    async def checkout_cb(callback: CallbackQuery, state: FSMContext):
         uid = str(callback.from_user.id)
         cart = info["carts"].get(uid, {})
         if not cart:
             await callback.answer("Savat bo'sh.", show_alert=True)
             return
+        await callback.message.answer("📍 Yetkazib berish manzilingizni yozing:")
+        await state.set_state(Checkout.waiting_address)
+        await callback.answer()
+
+    @dp.message(Checkout.waiting_address)
+    async def checkout_address(message: Message, state: FSMContext):
+        await state.update_data(address=message.text.strip())
+        await message.answer("📞 Telefon raqamingizni yuboring:")
+        await state.set_state(Checkout.waiting_phone)
+
+    @dp.message(Checkout.waiting_phone)
+    async def checkout_phone(message: Message, state: FSMContext):
+        phone = message.text.strip()
+        state_data = await state.get_data()
+        address = state_data.get("address", "-")
+
+        uid = str(message.from_user.id)
+        cart = info["carts"].get(uid, {})
         lines = []
         total = 0
         for pid, qty in cart.items():
@@ -428,18 +699,33 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             total += subtotal
             lines.append(f"{p['name']} x{qty} = {subtotal:,} so'm")
             p["qty"] = max(0, p["qty"] - qty)
-        username = callback.from_user.username or callback.from_user.id
-        text = f"🛒 <b>Yangi buyurtma!</b>\nXaridor: @{username}\n\n" + "\n".join(lines) + f"\n\n💰 Jami: {total:,} so'm"
-        await callback.bot.send_message(admin_id, text)
+
+        username = message.from_user.username or message.from_user.id
+        order_text = (
+            f"🛒 <b>Yangi buyurtma!</b>\n"
+            f"Xaridor: @{username}\n"
+            f"📍 Manzil: {address}\n"
+            f"📞 Telefon: {phone}\n\n"
+            + "\n".join(lines)
+            + f"\n\n💰 Jami: {total:,} so'm"
+        )
+        await message.bot.send_message(admin_id, order_text)
+
         info["carts"][uid] = {}
+        info["stats"]["orders"] += 1
+        info["stats"]["revenue"] += total
         save_data()
-        await callback.message.answer("✅ Buyurtmangiz qabul qilindi! Tez orada bog'lanishadi.")
-        await callback.answer()
+
+        await message.answer("✅ Buyurtmangiz qabul qilindi! Tez orada siz bilan bog'lanishadi.")
+        await state.clear()
 
 
 # ---------- AI-yordamchi bot ----------
 def setup_ai_bot(dp: Dispatcher, token: str):
     info = data["bots"][token]
+    admin_id = info["admin_id"]
+    info["stats"].setdefault("questions", 0)
+    setup_subscription_handlers(dp, token, admin_id)
 
     @dp.message(Command("start"))
     async def astart(message: Message):
@@ -447,10 +733,31 @@ def setup_ai_bot(dp: Dispatcher, token: str):
         if uid not in info["users"]:
             info["users"].append(uid)
             save_data()
-        await message.answer("🤖 Salom! Menga istalgan savolni yozing, sun'iy intellekt sifatida javob beraman.")
+        if not await check_active(message, info, admin_id):
+            return
+        if uid == admin_id:
+            await message.answer("🤖 Salom! Statistika: /stats, Majburiy obuna: /channels.\nSavol yozsangiz ham javob beraman.")
+        else:
+            await message.answer("🤖 Salom! Menga istalgan savolni yozing, sun'iy intellekt sifatida javob beraman.")
+
+    @dp.message(Command("stats"))
+    async def ai_stats(message: Message):
+        if message.from_user.id != admin_id:
+            return
+        await message.answer(
+            f"📊 <b>Statistika</b>\n\n"
+            f"👥 Foydalanuvchilar: {len(info['users'])}\n"
+            f"❓ Savollar soni: {info['stats']['questions']}"
+        )
 
     @dp.message(F.text)
     async def ai_chat(message: Message):
+        if not await check_active(message, info, admin_id):
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        info["stats"]["questions"] += 1
+        save_data()
         await message.bot.send_chat_action(message.chat.id, "typing")
         thinking = await message.answer("💭 O'ylayapman...")
         try:
@@ -465,11 +772,13 @@ def setup_ai_bot(dp: Dispatcher, token: str):
 def setup_post_bot(dp: Dispatcher, token: str):
     info = data["bots"][token]
     admin_id = info["admin_id"]
+    info["stats"].setdefault("posts_sent", 0)
+    setup_subscription_handlers(dp, token, admin_id)
 
     def admin_kb():
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📢 Xabar yuborish", callback_data="newpost")],
-            [InlineKeyboardButton(text="👥 Obunachilar soni", callback_data="substats")],
+            [InlineKeyboardButton(text="📊 Statistika", callback_data="pstats")],
         ])
 
     @dp.message(Command("start"))
@@ -478,17 +787,28 @@ def setup_post_bot(dp: Dispatcher, token: str):
         if uid not in info["users"]:
             info["users"].append(uid)
             save_data()
+        if not await check_active(message, info, admin_id):
+            return
         if uid == admin_id:
-            await message.answer("📢 <b>E'lon bot boshqaruvi</b>", reply_markup=admin_kb())
+            await message.answer("📢 <b>E'lon bot boshqaruvi</b>\n\nMajburiy obuna: /channels", reply_markup=admin_kb())
         else:
             await message.answer("📢 Yangiliklarga obuna bo'ldingiz!")
 
-    @dp.callback_query(F.data == "substats")
-    async def substats_cb(callback: CallbackQuery):
-        if callback.from_user.id != admin_id:
+    @dp.message(Command("stats"))
+    @dp.callback_query(F.data == "pstats")
+    async def post_stats(event):
+        if event.from_user.id != admin_id:
             return
-        await callback.message.answer(f"👥 Obunachilar soni: {len(info['users'])}")
-        await callback.answer()
+        text = (
+            f"📊 <b>Statistika</b>\n\n"
+            f"👥 Obunachilar: {len(info['users'])}\n"
+            f"📤 Yuborilgan e'lonlar: {info['stats']['posts_sent']}"
+        )
+        if isinstance(event, CallbackQuery):
+            await event.message.answer(text)
+            await event.answer()
+        else:
+            await event.answer(text)
 
     @dp.callback_query(F.data == "newpost")
     async def newpost_cb(callback: CallbackQuery, state: FSMContext):
@@ -522,6 +842,8 @@ def setup_post_bot(dp: Dispatcher, token: str):
                 count += 1
             except Exception:
                 pass
+        info["stats"]["posts_sent"] += 1
+        save_data()
         await callback.message.edit_text(f"✅ {count} ta foydalanuvchiga yuborildi.")
         await state.clear()
         await callback.answer()
@@ -553,8 +875,8 @@ async def start_child_bot(token: str, bot_type: str):
 
 async def main():
     for token, info in data["bots"].items():
+        info.setdefault("stats", {})
         await start_child_bot(token, info["type"])
-
     await main_dp.start_polling(main_bot)
 
 
