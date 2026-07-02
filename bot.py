@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatMemberStatus
 from aiogram.fsm.context import FSMContext
@@ -531,8 +531,35 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         for pid, p in info["products"].items():
             if p["qty"] > 0:
                 buttons.append([InlineKeyboardButton(text=f"{p['name']} — {p['price']:,} so'm", callback_data=f"buy_{pid}")])
-        buttons.append([InlineKeyboardButton(text="🛒 Savatim", callback_data="cart")])
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
+        return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+
+    def main_menu_kb():
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="🛍 Mahsulotlar"), KeyboardButton(text="🛒 Savatim")]],
+            resize_keyboard=True,
+        )
+
+    async def send_cart(user_id: int, send_func):
+        uid = str(user_id)
+        cart = info["carts"].get(uid, {})
+        if not cart:
+            await send_func("🛒 Savatingiz bo'sh.")
+            return
+        lines = []
+        total = 0
+        for pid, qty in cart.items():
+            p = info["products"].get(pid)
+            if not p:
+                continue
+            subtotal = p["price"] * qty
+            total += subtotal
+            lines.append(f"{p['name']} x{qty} = {subtotal:,} so'm")
+        text = "🛒 <b>Savatingiz:</b>\n\n" + "\n".join(lines) + f"\n\n💰 Jami: {total:,} so'm"
+        buttons = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Buyurtma berish", callback_data="checkout")],
+            [InlineKeyboardButton(text="🗑 Tozalash", callback_data="cart_clear")],
+        ])
+        await send_func(text, reply_markup=buttons)
 
     @dp.message(Command("start"))
     async def sstart(message: Message):
@@ -548,9 +575,27 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         if not await require_subscription(message, info, admin_id):
             return
         if not info["products"]:
+            await message.answer("Hozircha mahsulotlar yo'q.", reply_markup=main_menu_kb())
+        else:
+            kb = catalog_kb()
+            await message.answer("🛍 Mahsulotlar:", reply_markup=kb)
+            await message.answer("Pastdagi menyudan foydalaning 👇", reply_markup=main_menu_kb())
+
+    @dp.message(F.text == "🛍 Mahsulotlar")
+    async def show_catalog(message: Message):
+        if not await check_active(message, info, admin_id):
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        kb = catalog_kb()
+        if not kb:
             await message.answer("Hozircha mahsulotlar yo'q.")
         else:
-            await message.answer("🛍 Mahsulotlar:", reply_markup=catalog_kb())
+            await message.answer("🛍 Mahsulotlar:", reply_markup=kb)
+
+    @dp.message(F.text == "🛒 Savatim")
+    async def show_cart_menu(message: Message):
+        await send_cart(message.from_user.id, message.answer)
 
     @dp.message(Command("stats"))
     async def shop_stats(message: Message):
@@ -603,19 +648,14 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         await message.answer(f"✅ Qo'shildi: {state_data['name']} — {state_data['price']:,} so'm ({qty} dona)")
         await state.clear()
 
-        # Mavjud xaridorlarga yangi mahsulot haqida xabar
-        notify_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"🛒 {state_data['name']} — {state_data['price']:,} so'm", callback_data=f"buy_{pid}")]
-        ])
+        # Mavjud xaridorlarga yangilangan katalogni tabiiy ko'rinishda yuborish
         for uid in info["users"]:
             if uid == admin_id:
                 continue
             try:
-                await message.bot.send_message(
-                    uid,
-                    f"🆕 <b>Yangi mahsulot qo'shildi!</b>\n\n{state_data['name']} — {state_data['price']:,} so'm ({qty} dona)",
-                    reply_markup=notify_kb,
-                )
+                kb = catalog_kb()
+                if kb:
+                    await message.bot.send_message(uid, "🛍 Mahsulotlar:", reply_markup=kb)
             except Exception:
                 pass
 
@@ -675,27 +715,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
     @dp.callback_query(F.data == "cart")
     async def cart_cb(callback: CallbackQuery):
-        uid = str(callback.from_user.id)
-        cart = info["carts"].get(uid, {})
-        if not cart:
-            await callback.message.answer("🛒 Savatingiz bo'sh.")
-            await callback.answer()
-            return
-        lines = []
-        total = 0
-        for pid, qty in cart.items():
-            p = info["products"].get(pid)
-            if not p:
-                continue
-            subtotal = p["price"] * qty
-            total += subtotal
-            lines.append(f"{p['name']} x{qty} = {subtotal:,} so'm")
-        text = "🛒 <b>Savatingiz:</b>\n\n" + "\n".join(lines) + f"\n\n💰 Jami: {total:,} so'm"
-        buttons = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Buyurtma berish", callback_data="checkout")],
-            [InlineKeyboardButton(text="🗑 Tozalash", callback_data="cart_clear")],
-        ])
-        await callback.message.answer(text, reply_markup=buttons)
+        await send_cart(callback.from_user.id, callback.message.answer)
         await callback.answer()
 
     @dp.callback_query(F.data == "cart_clear")
