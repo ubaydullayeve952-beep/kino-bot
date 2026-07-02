@@ -40,6 +40,7 @@ PRICES = {
     "shop": 250_000,
     "post": 100_000,
 }
+MONTHLY_RATE = 0.2  # keyingi oylar uchun narxning 20 foizi
 
 running_bots = {}
 
@@ -61,10 +62,19 @@ data.setdefault("next_bot_id", 1)
 
 
 def is_active(info: dict) -> bool:
-    if info.get("paid"):
+    paid_until = info.get("paid_until")
+    if paid_until and datetime.now() < datetime.fromisoformat(paid_until):
         return True
     created = datetime.fromisoformat(info["created_at"])
     return datetime.now() < created + timedelta(days=TRIAL_DAYS)
+
+
+def next_payment_amount(info: dict) -> int:
+    """Birinchi to'lov — to'liq narx. Keyingi to'lovlar — 20 foiz."""
+    price = PRICES.get(info["type"], 0)
+    if info.get("paid_until"):
+        return int(price * MONTHLY_RATE)
+    return price
 
 
 async def ask_gemini(prompt: str) -> str:
@@ -156,17 +166,26 @@ async def require_subscription(event, info: dict, admin_id: int) -> bool:
 
 
 async def check_active(event, info: dict, admin_id: int) -> bool:
-    """True bo'lsa - bot ishlaydi. False bo'lsa - sinov tugagan / to'lanmagan."""
+    """True bo'lsa - bot ishlaydi. False bo'lsa - sinov tugagan / to'lov kerak."""
     if is_active(info):
         return True
     uid = event.from_user.id
-    price = PRICES.get(info["type"], 0)
+    amount = next_payment_amount(info)
+    is_renewal = bool(info.get("paid_until"))
     if uid == admin_id:
-        text = (
-            f"⏳ <b>Bepul sinov muddati tugadi.</b>\n\n"
-            f"Ushbu bot ({BOT_TYPES.get(info['type'])}) narxi: <b>{price:,} so'm/oy</b>.\n\n"
-            "To'lovni amalga oshirish uchun platforma administratoriga murojaat qiling."
-        )
+        if is_renewal:
+            text = (
+                f"⏳ <b>Oylik to'lov muddati tugadi.</b>\n\n"
+                f"Davom ettirish uchun: <b>{amount:,} so'm</b> (oylik, narxning 20%).\n\n"
+                "To'lovni amalga oshirish uchun platforma administratoriga murojaat qiling."
+            )
+        else:
+            text = (
+                f"⏳ <b>Bepul sinov muddati tugadi.</b>\n\n"
+                f"Ushbu bot ({BOT_TYPES.get(info['type'])}) boshlang'ich narxi: <b>{amount:,} so'm</b>.\n"
+                f"Keyingi oylardan boshlab: {int(PRICES.get(info['type'], 0) * MONTHLY_RATE):,} so'm/oy.\n\n"
+                "To'lovni amalga oshirish uchun platforma administratoriga murojaat qiling."
+            )
     else:
         text = "🚧 Bot vaqtincha ishlamayapti."
     if isinstance(event, CallbackQuery):
@@ -274,11 +293,12 @@ async def main_start(message: Message):
     text = (
         "🤖 <b>Bot yaratuvchi platformaga xush kelibsiz!</b>\n\n"
         "Bu yerda bir necha daqiqada o'zingizga kerakli botni yaratishingiz mumkin.\n\n"
-        "💳 <b>Narxlar (oyiga):</b>\n"
+        "💳 <b>Boshlang'ich narxlar:</b>\n"
         f"🎬 Kino bot — {PRICES['kino']:,} so'm\n"
         f"🤖 AI-yordamchi bot — {PRICES['ai']:,} so'm\n"
         f"🛒 Savdo bot — {PRICES['shop']:,} so'm\n"
         f"📢 E'lon/Xabar bot — {PRICES['post']:,} so'm\n\n"
+        f"📅 Keyingi oylardan boshlab — narxning atigi {int(MONTHLY_RATE*100)}%.\n"
         f"🎁 Har bir bot uchun {TRIAL_DAYS} kunlik BEPUL sinov muddati bor!\n\n"
         "Bot yaratish: /newbot\n"
         "Botlaringiz: /mybots"
@@ -330,7 +350,7 @@ async def newbot_type(callback: CallbackQuery, state: FSMContext):
         "name": bot_name,
         "admin_id": callback.from_user.id,
         "created_at": datetime.now().isoformat(),
-        "paid": False,
+        "paid_until": None,
         "movies": {},
         "products": {},
         "next_id": 1,
@@ -365,15 +385,21 @@ async def mybots(message: Message):
         return
 
     for token, info in items:
-        status = "🟢 Faol" if is_active(info) else "🔴 Sinov tugagan"
-        paid_note = " (to'langan)" if info.get("paid") else ""
+        status = "🟢 Faol" if is_active(info) else "🔴 Sinov/to'lov tugagan"
+        paid_until = info.get("paid_until")
+        if paid_until:
+            date_str = datetime.fromisoformat(paid_until).strftime("%d.%m.%Y")
+            paid_note = f" (to'langan: {date_str} gacha)"
+        else:
+            paid_note = ""
         text = f"{BOT_TYPES.get(info['type'])}: <b>{info['name']}</b>\n{status}{paid_note}"
         if uid == ADMIN_ID and info["admin_id"] != ADMIN_ID:
             text += f"\n👤 Egasi ID: {info['admin_id']}"
         kb = None
-        if uid == ADMIN_ID and not info.get("paid"):
+        if uid == ADMIN_ID:
+            amount = next_payment_amount(info)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ To'lovni tasdiqlash", callback_data=f"activate_{info['id']}")]
+                [InlineKeyboardButton(text=f"✅ To'lovni tasdiqlash ({amount:,} so'm)", callback_data=f"activate_{info['id']}")]
             ])
         await message.answer(text, reply_markup=kb)
 
@@ -385,9 +411,9 @@ async def activate_cb(callback: CallbackQuery):
     bot_id = int(callback.data.split("_", 1)[1])
     for token, info in data["bots"].items():
         if info.get("id") == bot_id:
-            info["paid"] = True
+            info["paid_until"] = (datetime.now() + timedelta(days=30)).isoformat()
             save_data()
-            await callback.message.answer(f"✅ {info['name']} bot faollashtirildi.")
+            await callback.message.answer(f"✅ {info['name']} bot 30 kunga faollashtirildi.")
             break
     await callback.answer()
 
@@ -576,6 +602,22 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         save_data()
         await message.answer(f"✅ Qo'shildi: {state_data['name']} — {state_data['price']:,} so'm ({qty} dona)")
         await state.clear()
+
+        # Mavjud xaridorlarga yangi mahsulot haqida xabar
+        notify_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"🛒 {state_data['name']} — {state_data['price']:,} so'm", callback_data=f"buy_{pid}")]
+        ])
+        for uid in info["users"]:
+            if uid == admin_id:
+                continue
+            try:
+                await message.bot.send_message(
+                    uid,
+                    f"🆕 <b>Yangi mahsulot qo'shildi!</b>\n\n{state_data['name']} — {state_data['price']:,} so'm ({qty} dona)",
+                    reply_markup=notify_kb,
+                )
+            except Exception:
+                pass
 
     @dp.callback_query(F.data == "plist")
     async def plist_cb(callback: CallbackQuery):
