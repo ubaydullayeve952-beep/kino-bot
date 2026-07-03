@@ -149,6 +149,7 @@ def setup_admin_management(dp: Dispatcher, token: str):
         await message.answer("❌ Jarayon bekor qilindi.")
 
     @dp.message(Command("admins"))
+    @dp.message(F.text == "👤 Adminlar")
     async def admins_panel(message: Message):
         if not is_admin(info, message.from_user.id):
             return
@@ -380,6 +381,7 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
             await callback.answer()
 
     @dp.message(Command("channels"))
+    @dp.message(F.text == "📡 Majburiy obuna")
     async def channels_panel(message: Message):
         if not is_admin(info, message.from_user.id):
             return
@@ -536,6 +538,12 @@ def setup_kino_bot(dp: Dispatcher, token: str):
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
 
+    def kino_admin_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="🎬 Film qo'shish"), KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
+        ], resize_keyboard=True)
+
     @dp.message(Command("start"))
     async def kstart(message: Message):
         uid = message.from_user.id
@@ -546,16 +554,14 @@ def setup_kino_bot(dp: Dispatcher, token: str):
             return
         if is_admin(info, uid):
             await message.answer(
-                "🎬 <b>Kino bot boshqaruvi</b>\n\n"
-                "Yangi film qo'shish: /addmovie\n"
-                "Statistika: /stats\n"
-                "Majburiy obuna: /channels\n\n"
-                "Foydalanuvchilar film kodini yuborsa, filmni topib beraman."
+                "🎬 <b>Kino bot boshqaruvi</b>\n\nPastdagi menyudan foydalaning 👇",
+                reply_markup=kino_admin_kb(),
             )
         else:
             await message.answer("🎬 Film kodini yuboring, men uni topib beraman.")
 
     @dp.message(Command("stats"))
+    @dp.message(F.text == "📊 Statistika")
     async def kino_stats(message: Message):
         if not is_admin(info, message.from_user.id):
             return
@@ -567,6 +573,7 @@ def setup_kino_bot(dp: Dispatcher, token: str):
         )
 
     @dp.message(Command("addmovie"))
+    @dp.message(F.text == "🎬 Film qo'shish")
     async def addmovie_cmd(message: Message, state: FSMContext):
         if not is_admin(info, message.from_user.id):
             return
@@ -673,6 +680,12 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         ])
         await send_func(text, reply_markup=buttons)
 
+    def shop_admin_menu_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
+        ], resize_keyboard=True)
+
     @dp.message(Command("start"))
     async def sstart(message: Message):
         uid = message.from_user.id
@@ -682,7 +695,8 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         if not await check_active(message, info, admin_id):
             return
         if is_admin(info, uid):
-            await message.answer("🛒 <b>Savdo bot boshqaruvi</b>\n\nStatistika: /stats\nMajburiy obuna: /channels", reply_markup=admin_kb())
+            await message.answer("🛒 <b>Savdo bot boshqaruvi</b>", reply_markup=admin_kb())
+            await message.answer("Qo'shimcha bo'limlar 👇", reply_markup=shop_admin_menu_kb())
             return
         if not await require_subscription(message, info, admin_id):
             return
@@ -710,6 +724,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         await send_cart(message.from_user.id, message.answer)
 
     @dp.message(Command("stats"))
+    @dp.message(F.text == "📊 Statistika")
     async def shop_stats(message: Message):
         if not is_admin(info, message.from_user.id):
             return
@@ -902,6 +917,12 @@ def setup_ai_bot(dp: Dispatcher, token: str):
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
 
+    def ai_admin_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
+        ], resize_keyboard=True)
+
     @dp.message(Command("start"))
     async def astart(message: Message):
         uid = message.from_user.id
@@ -911,11 +932,15 @@ def setup_ai_bot(dp: Dispatcher, token: str):
         if not await check_active(message, info, admin_id):
             return
         if is_admin(info, uid):
-            await message.answer("🤖 Salom! Statistika: /stats, Majburiy obuna: /channels.\nSavol yozsangiz ham javob beraman.")
+            await message.answer(
+                "🤖 Salom! Pastdagi menyudan foydalaning 👇\nSavol yozsangiz ham javob beraman.",
+                reply_markup=ai_admin_kb(),
+            )
         else:
             await message.answer("🤖 Salom! Menga istalgan savolni yozing, sun'iy intellekt sifatida javob beraman.")
 
     @dp.message(Command("stats"))
+    @dp.message(F.text == "📊 Statistika")
     async def ai_stats(message: Message):
         if not is_admin(info, message.from_user.id):
             return
@@ -957,6 +982,11 @@ def setup_post_bot(dp: Dispatcher, token: str):
             [InlineKeyboardButton(text="📊 Statistika", callback_data="pstats")],
         ])
 
+    def post_menu_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
+        ], resize_keyboard=True)
+
     @dp.message(Command("start"))
     async def pstart(message: Message):
         uid = message.from_user.id
@@ -966,11 +996,13 @@ def setup_post_bot(dp: Dispatcher, token: str):
         if not await check_active(message, info, admin_id):
             return
         if is_admin(info, uid):
-            await message.answer("📢 <b>E'lon bot boshqaruvi</b>\n\nMajburiy obuna: /channels", reply_markup=admin_kb())
+            await message.answer("📢 <b>E'lon bot boshqaruvi</b>", reply_markup=admin_kb())
+            await message.answer("Qo'shimcha bo'limlar 👇", reply_markup=post_menu_kb())
         else:
             await message.answer("📢 Yangiliklarga obuna bo'ldingiz!")
 
     @dp.message(Command("stats"))
+    @dp.message(F.text == "📊 Statistika")
     @dp.callback_query(F.data == "pstats")
     async def post_stats(event):
         if not is_admin(info, event.from_user.id):
@@ -987,12 +1019,16 @@ def setup_post_bot(dp: Dispatcher, token: str):
             await event.answer(text)
 
     @dp.callback_query(F.data == "newpost")
-    async def newpost_cb(callback: CallbackQuery, state: FSMContext):
-        if not is_admin(info, callback.from_user.id):
+    @dp.message(F.text == "📢 Xabar yuborish")
+    async def newpost_cb(event, state: FSMContext):
+        if not is_admin(info, event.from_user.id):
             return
-        await callback.message.answer("E'lon matnini yuboring:")
+        if isinstance(event, CallbackQuery):
+            await event.message.answer("E'lon matnini yuboring:")
+            await event.answer()
+        else:
+            await event.answer("E'lon matnini yuboring:")
         await state.set_state(PostFlow.waiting_text)
-        await callback.answer()
 
     @dp.message(PostFlow.waiting_text)
     async def post_text(message: Message, state: FSMContext):
