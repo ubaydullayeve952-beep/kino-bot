@@ -118,6 +118,99 @@ class AddChannel(StatesGroup):
     waiting_username = State()
 
 
+class AddAdmin(StatesGroup):
+    waiting_id = State()
+
+
+def is_admin(info: dict, uid: int) -> bool:
+    return uid in info.get("admin_ids", [info.get("admin_id")])
+
+
+def admins_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="adm_add")],
+        [InlineKeyboardButton(text="📋 Adminlar ro'yxati", callback_data="adm_list")],
+        [InlineKeyboardButton(text="➖ Adminni o'chirish", callback_data="adm_del")],
+    ])
+
+
+def setup_admin_management(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+    info.setdefault("admin_ids", [info.get("admin_id")])
+    owner_id = info["admin_id"]
+
+    @dp.message(Command("cancel"))
+    async def cancel_cmd(message: Message, state: FSMContext):
+        current = await state.get_state()
+        if current is None:
+            await message.answer("Bekor qilinadigan jarayon yo'q.")
+            return
+        await state.clear()
+        await message.answer("❌ Jarayon bekor qilindi.")
+
+    @dp.message(Command("admins"))
+    async def admins_panel(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        await message.answer("👤 Adminlar boshqaruvi:", reply_markup=admins_kb())
+
+    @dp.callback_query(F.data == "adm_add")
+    async def adm_add_cb(callback: CallbackQuery, state: FSMContext):
+        if not is_admin(info, callback.from_user.id):
+            return
+        await callback.message.answer("Yangi admin Telegram ID'ini yuboring (/myid orqali bilib olish mumkin):")
+        await state.set_state(AddAdmin.waiting_id)
+        await callback.answer()
+
+    @dp.message(AddAdmin.waiting_id)
+    async def adm_add_process(message: Message, state: FSMContext):
+        try:
+            new_id = int(message.text.strip())
+        except ValueError:
+            await message.answer("❌ Faqat raqam kiriting.")
+            return
+        if new_id not in info["admin_ids"]:
+            info["admin_ids"].append(new_id)
+            save_data()
+        await message.answer(f"✅ Admin qo'shildi: {new_id}")
+        await state.clear()
+
+    @dp.callback_query(F.data == "adm_list")
+    async def adm_list_cb(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        lines = []
+        for aid in info["admin_ids"]:
+            tag = " (asosiy)" if aid == owner_id else ""
+            lines.append(f"• {aid}{tag}")
+        await callback.message.answer("👤 Adminlar:\n\n" + "\n".join(lines))
+        await callback.answer()
+
+    @dp.callback_query(F.data == "adm_del")
+    async def adm_del_cb(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        removable = [aid for aid in info["admin_ids"] if aid != owner_id]
+        if not removable:
+            await callback.message.answer("O'chirish uchun qo'shimcha admin yo'q.")
+            await callback.answer()
+            return
+        buttons = [[InlineKeyboardButton(text=str(aid), callback_data=f"admdel_{aid}")] for aid in removable]
+        await callback.message.answer("O'chirmoqchi bo'lgan adminni tanlang:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("admdel_"))
+    async def adm_delid_cb(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        target_id = int(callback.data.split("_", 1)[1])
+        if target_id in info["admin_ids"] and target_id != owner_id:
+            info["admin_ids"].remove(target_id)
+            save_data()
+            await callback.message.answer(f"🗑 Admin o'chirildi: {target_id}")
+        await callback.answer()
+
+
 # ---------- Majburiy obuna (barcha botlar uchun umumiy) ----------
 def channels_admin_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -149,7 +242,7 @@ def subscribe_kb(missing):
 
 async def require_subscription(event, info: dict, admin_id: int) -> bool:
     uid = event.from_user.id
-    if uid == admin_id:
+    if is_admin(info, uid):
         return True
     channels = info.get("channels", {})
     if not channels:
@@ -174,7 +267,7 @@ async def check_active(event, info: dict, admin_id: int) -> bool:
     uid = event.from_user.id
     amount = next_payment_amount(info)
     is_renewal = bool(info.get("paid_until"))
-    if uid == admin_id:
+    if is_admin(info, uid):
         if is_renewal:
             text = (
                 f"⏳ <b>Oylik to'lov muddati tugadi.</b>\n\n"
@@ -204,7 +297,7 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
 
     @dp.callback_query(F.data == "ch_add")
     async def ch_add_cb(callback: CallbackQuery, state: FSMContext):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         await callback.message.answer(
             "Kanal usernameni yuboring (masalan: @mening_kanalim).\n"
@@ -215,7 +308,7 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
 
     @dp.message(AddChannel.waiting_username)
     async def ch_add_process(message: Message, state: FSMContext):
-        if message.from_user.id != admin_id:
+        if not is_admin(info, message.from_user.id):
             return
         username = message.text.strip()
         try:
@@ -243,7 +336,7 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
 
     @dp.callback_query(F.data == "ch_list")
     async def ch_list_cb(callback: CallbackQuery):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         if not info["channels"]:
             await callback.message.answer("Hozircha majburiy kanallar yo'q.")
@@ -256,7 +349,7 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
 
     @dp.callback_query(F.data == "ch_del")
     async def ch_del_cb(callback: CallbackQuery):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         if not info["channels"]:
             await callback.message.answer("O'chirish uchun kanal yo'q.")
@@ -268,7 +361,7 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
 
     @dp.callback_query(F.data.startswith("chdel_"))
     async def ch_delid_cb(callback: CallbackQuery):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         cid = callback.data.split("_", 1)[1]
         removed = info["channels"].pop(cid, None)
@@ -288,7 +381,7 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
 
     @dp.message(Command("channels"))
     async def channels_panel(message: Message):
-        if message.from_user.id != admin_id:
+        if not is_admin(info, message.from_user.id):
             return
         await message.answer("📡 Majburiy obuna boshqaruvi:", reply_markup=channels_admin_kb())
 
@@ -365,6 +458,7 @@ async def newbot_type(callback: CallbackQuery, state: FSMContext):
         "type": bot_type,
         "name": bot_name,
         "admin_id": callback.from_user.id,
+        "admin_ids": [callback.from_user.id],
         "created_at": datetime.now().isoformat(),
         "paid_until": None,
         "movies": {},
@@ -394,7 +488,7 @@ async def mybots(message: Message):
     if uid == ADMIN_ID:
         items = list(data["bots"].items())
     else:
-        items = [(t, i) for t, i in data["bots"].items() if i["admin_id"] == uid]
+        items = [(t, i) for t, i in data["bots"].items() if uid in i.get("admin_ids", [i["admin_id"]])]
 
     if not items:
         await message.answer("Hali botlaringiz yo'q. /newbot orqali yarating.")
@@ -440,6 +534,7 @@ def setup_kino_bot(dp: Dispatcher, token: str):
     admin_id = info["admin_id"]
     info["stats"].setdefault("requests", 0)
     setup_subscription_handlers(dp, token, admin_id)
+    setup_admin_management(dp, token)
 
     @dp.message(Command("start"))
     async def kstart(message: Message):
@@ -449,7 +544,7 @@ def setup_kino_bot(dp: Dispatcher, token: str):
             save_data()
         if not await check_active(message, info, admin_id):
             return
-        if uid == admin_id:
+        if is_admin(info, uid):
             await message.answer(
                 "🎬 <b>Kino bot boshqaruvi</b>\n\n"
                 "Yangi film qo'shish: /addmovie\n"
@@ -462,7 +557,7 @@ def setup_kino_bot(dp: Dispatcher, token: str):
 
     @dp.message(Command("stats"))
     async def kino_stats(message: Message):
-        if message.from_user.id != admin_id:
+        if not is_admin(info, message.from_user.id):
             return
         await message.answer(
             f"📊 <b>Statistika</b>\n\n"
@@ -473,7 +568,7 @@ def setup_kino_bot(dp: Dispatcher, token: str):
 
     @dp.message(Command("addmovie"))
     async def addmovie_cmd(message: Message, state: FSMContext):
-        if message.from_user.id != admin_id:
+        if not is_admin(info, message.from_user.id):
             return
         await message.answer("Kino kodini yuboring (faqat raqam, masalan: 40):")
         await state.set_state(AddMovie.waiting_code)
@@ -534,6 +629,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("orders", 0)
     info["stats"].setdefault("revenue", 0)
     setup_subscription_handlers(dp, token, admin_id)
+    setup_admin_management(dp, token)
 
     def admin_kb():
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -585,7 +681,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             save_data()
         if not await check_active(message, info, admin_id):
             return
-        if uid == admin_id:
+        if is_admin(info, uid):
             await message.answer("🛒 <b>Savdo bot boshqaruvi</b>\n\nStatistika: /stats\nMajburiy obuna: /channels", reply_markup=admin_kb())
             return
         if not await require_subscription(message, info, admin_id):
@@ -615,7 +711,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
     @dp.message(Command("stats"))
     async def shop_stats(message: Message):
-        if message.from_user.id != admin_id:
+        if not is_admin(info, message.from_user.id):
             return
         await message.answer(
             f"📊 <b>Statistika</b>\n\n"
@@ -626,7 +722,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
     @dp.callback_query(F.data == "padd")
     async def padd_cb(callback: CallbackQuery, state: FSMContext):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         await callback.message.answer("Mahsulot nomini yozing:")
         await state.set_state(AddProduct.waiting_name)
@@ -666,7 +762,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
         # Mavjud xaridorlarga yangilangan katalogni tabiiy ko'rinishda yuborish
         for uid in info["users"]:
-            if uid == admin_id:
+            if is_admin(info, uid):
                 continue
             try:
                 kb = catalog_kb()
@@ -677,7 +773,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
     @dp.callback_query(F.data == "plist")
     async def plist_cb(callback: CallbackQuery):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         if not info["products"]:
             await callback.message.answer("Mahsulotlar yo'q.")
@@ -690,7 +786,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
     @dp.callback_query(F.data == "pdel")
     async def pdel_cb(callback: CallbackQuery):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         if not info["products"]:
             await callback.message.answer("O'chirish uchun mahsulot yo'q.")
@@ -702,7 +798,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
     @dp.callback_query(F.data.startswith("pdelid_"))
     async def pdelid_cb(callback: CallbackQuery):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         pid = callback.data.split("_", 1)[1]
         removed = info["products"].pop(pid, None)
@@ -804,6 +900,7 @@ def setup_ai_bot(dp: Dispatcher, token: str):
     admin_id = info["admin_id"]
     info["stats"].setdefault("questions", 0)
     setup_subscription_handlers(dp, token, admin_id)
+    setup_admin_management(dp, token)
 
     @dp.message(Command("start"))
     async def astart(message: Message):
@@ -813,14 +910,14 @@ def setup_ai_bot(dp: Dispatcher, token: str):
             save_data()
         if not await check_active(message, info, admin_id):
             return
-        if uid == admin_id:
+        if is_admin(info, uid):
             await message.answer("🤖 Salom! Statistika: /stats, Majburiy obuna: /channels.\nSavol yozsangiz ham javob beraman.")
         else:
             await message.answer("🤖 Salom! Menga istalgan savolni yozing, sun'iy intellekt sifatida javob beraman.")
 
     @dp.message(Command("stats"))
     async def ai_stats(message: Message):
-        if message.from_user.id != admin_id:
+        if not is_admin(info, message.from_user.id):
             return
         await message.answer(
             f"📊 <b>Statistika</b>\n\n"
@@ -852,6 +949,7 @@ def setup_post_bot(dp: Dispatcher, token: str):
     admin_id = info["admin_id"]
     info["stats"].setdefault("posts_sent", 0)
     setup_subscription_handlers(dp, token, admin_id)
+    setup_admin_management(dp, token)
 
     def admin_kb():
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -867,7 +965,7 @@ def setup_post_bot(dp: Dispatcher, token: str):
             save_data()
         if not await check_active(message, info, admin_id):
             return
-        if uid == admin_id:
+        if is_admin(info, uid):
             await message.answer("📢 <b>E'lon bot boshqaruvi</b>\n\nMajburiy obuna: /channels", reply_markup=admin_kb())
         else:
             await message.answer("📢 Yangiliklarga obuna bo'ldingiz!")
@@ -875,7 +973,7 @@ def setup_post_bot(dp: Dispatcher, token: str):
     @dp.message(Command("stats"))
     @dp.callback_query(F.data == "pstats")
     async def post_stats(event):
-        if event.from_user.id != admin_id:
+        if not is_admin(info, event.from_user.id):
             return
         text = (
             f"📊 <b>Statistika</b>\n\n"
@@ -890,7 +988,7 @@ def setup_post_bot(dp: Dispatcher, token: str):
 
     @dp.callback_query(F.data == "newpost")
     async def newpost_cb(callback: CallbackQuery, state: FSMContext):
-        if callback.from_user.id != admin_id:
+        if not is_admin(info, callback.from_user.id):
             return
         await callback.message.answer("E'lon matnini yuboring:")
         await state.set_state(PostFlow.waiting_text)
