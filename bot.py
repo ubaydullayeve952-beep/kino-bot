@@ -136,6 +136,8 @@ async def get_missing_channels(bot: Bot, channels: dict, user_id: int):
                 missing.append(info)
         except Exception as e:
             logging.error(f"Obuna tekshirishda xato ({chat_id}): {e}")
+            # Xatolik bo'lsa ham xavfsiz tomonni tanlaymiz — obuna talab qilinadi
+            missing.append(info)
     return missing
 
 
@@ -221,8 +223,22 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
             info["channels"][str(chat.id)] = {"username": username, "title": chat.title}
             save_data()
             await message.answer(f"✅ Qo'shildi: {chat.title}")
+
+            # Bot o'sha kanalda ADMIN ekanligini darhol tekshiramiz
+            try:
+                bot_member = await message.bot.get_chat_member(chat_id=chat.id, user_id=message.bot.id)
+                if bot_member.status not in ("administrator", "creator"):
+                    await message.answer(
+                        f"⚠️ <b>Diqqat!</b> Bot \"{chat.title}\" kanalida ADMIN emas.\n"
+                        "Obuna tekshiruvi ishlashi uchun botni o'sha kanalga ADMIN qilib qo'ying!"
+                    )
+            except Exception:
+                await message.answer(
+                    f"⚠️ <b>Diqqat!</b> Bot \"{chat.title}\" kanalida ADMIN ekanligini tekshira olmadim.\n"
+                    "Iltimos, botni o'sha kanalga ADMIN qilib qo'ying, aks holda obuna tekshiruvi ishlamaydi!"
+                )
         except Exception as e:
-            await message.answer(f"❌ Xatolik: kanal topilmadi yoki bot u yerda admin emas.\n{e}")
+            await message.answer(f"❌ Xatolik: kanal topilmadi.\n{e}")
         await state.clear()
 
     @dp.callback_query(F.data == "ch_list")
