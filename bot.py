@@ -79,6 +79,7 @@ def save_data():
 data = load_data()
 data.setdefault("next_bot_id", 1)
 data.setdefault("prices", dict(DEFAULT_PRICES))
+data.setdefault("global_buttons", [])  # [{"label": "...", "response": "..."}]
 for _key, _val in DEFAULT_PRICES.items():
     data["prices"].setdefault(_key, _val)
 
@@ -124,6 +125,11 @@ class NewBotFlow(StatesGroup):
 
 class EditPrice(StatesGroup):
     waiting_amount = State()
+
+
+class GlobalButtonAdd(StatesGroup):
+    waiting_label = State()
+    waiting_response = State()
 
 
 class AddMovie(StatesGroup):
@@ -601,6 +607,88 @@ async def editprice_save(message: Message, state: FSMContext):
     await state.clear()
 
 
+@main_dp.message(Command("globalbuttons"))
+async def global_buttons_panel(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    buttons = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Tugma qo'shish", callback_data="gb_add")],
+        [InlineKeyboardButton(text="📋 Tugmalar ro'yxati", callback_data="gb_list")],
+        [InlineKeyboardButton(text="➖ Tugmani o'chirish", callback_data="gb_del")],
+    ])
+    await message.answer(
+        "🧩 <b>Global tugmalar boshqaruvi</b>\n\n"
+        "Bu yerda qo'shgan tugma barcha 10 turdagi botning menyusiga avtomatik qo'shiladi.",
+        reply_markup=buttons,
+    )
+
+
+@main_dp.callback_query(F.data == "gb_add")
+async def gb_add_cb(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.message.answer("Tugma nomini yozing (masalan: ℹ️ Biz haqimizda):")
+    await state.set_state(GlobalButtonAdd.waiting_label)
+    await callback.answer()
+
+
+@main_dp.message(GlobalButtonAdd.waiting_label)
+async def gb_add_label(message: Message, state: FSMContext):
+    await state.update_data(label=message.text.strip())
+    await message.answer("Endi shu tugma bosilganda chiqadigan javob matnini yozing:")
+    await state.set_state(GlobalButtonAdd.waiting_response)
+
+
+@main_dp.message(GlobalButtonAdd.waiting_response)
+async def gb_add_response(message: Message, state: FSMContext):
+    state_data = await state.get_data()
+    label = state_data.get("label")
+    data["global_buttons"].append({"label": label, "response": message.text})
+    save_data()
+    await message.answer(f"✅ Tugma qo'shildi: {label}\n\nEndi barcha botlarda ko'rinadi.")
+    await state.clear()
+
+
+@main_dp.callback_query(F.data == "gb_list")
+async def gb_list_cb(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    if not data["global_buttons"]:
+        await callback.message.answer("Hozircha global tugmalar yo'q.")
+    else:
+        text = "📋 <b>Global tugmalar:</b>\n\n" + "\n".join(f"• {b['label']}" for b in data["global_buttons"])
+        await callback.message.answer(text)
+    await callback.answer()
+
+
+@main_dp.callback_query(F.data == "gb_del")
+async def gb_del_cb(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    if not data["global_buttons"]:
+        await callback.message.answer("O'chirish uchun tugma yo'q.")
+        await callback.answer()
+        return
+    buttons = [
+        [InlineKeyboardButton(text=b["label"], callback_data=f"gbdel_{i}")]
+        for i, b in enumerate(data["global_buttons"])
+    ]
+    await callback.message.answer("O'chirmoqchi bo'lgan tugmani tanlang:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@main_dp.callback_query(F.data.startswith("gbdel_"))
+async def gb_delid_cb(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    idx = int(callback.data.split("_", 1)[1])
+    if 0 <= idx < len(data["global_buttons"]):
+        removed = data["global_buttons"].pop(idx)
+        save_data()
+        await callback.message.answer(f"🗑 O'chirildi: {removed['label']}")
+    await callback.answer()
+
+
 @main_dp.message(Command("mybots"))
 async def mybots(message: Message):
     uid = message.from_user.id
@@ -654,13 +742,14 @@ def setup_kino_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("requests", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def kino_admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="🎬 Film qo'shish"), KeyboardButton(text="📋 Filmlar ro'yxati")],
             [KeyboardButton(text="🗑 Film o'chirish"), KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def kstart(message: Message):
@@ -788,6 +877,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("revenue", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def admin_kb():
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -798,7 +888,8 @@ def setup_shop_bot(dp: Dispatcher, token: str):
 
     def catalog_kb():
         buttons = []
-        for pid, p in info["products"].items():
+        sorted_products = sorted(info["products"].items(), key=lambda item: item[1]["name"].lower())
+        for pid, p in sorted_products:
             if p["qty"] > 0:
                 buttons.append([InlineKeyboardButton(text=f"{p['name']} — {p['price']:,} so'm", callback_data=f"buy_{pid}")])
         return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
@@ -838,7 +929,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def sstart(message: Message):
@@ -936,8 +1027,9 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         if not info["products"]:
             await callback.message.answer("Mahsulotlar yo'q.")
         else:
-            text = "📦 <b>Mahsulotlar:</b>\n\n" + "\n".join(
-                f"#{pid}: {p['name']} — {p['price']:,} so'm ({p['qty']} dona)" for pid, p in info["products"].items()
+            sorted_products = sorted(info["products"].items(), key=lambda item: item[1]["name"].lower())
+            text = "📦 <b>Mahsulotlar (alifbo tartibida):</b>\n\n" + "\n".join(
+                f"#{pid}: {p['name']} — {p['price']:,} so'm ({p['qty']} dona)" for pid, p in sorted_products
             )
             await callback.message.answer(text)
         await callback.answer()
@@ -950,7 +1042,8 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             await callback.message.answer("O'chirish uchun mahsulot yo'q.")
             await callback.answer()
             return
-        buttons = [[InlineKeyboardButton(text=p["name"], callback_data=f"pdelid_{pid}")] for pid, p in info["products"].items()]
+        sorted_products = sorted(info["products"].items(), key=lambda item: item[1]["name"].lower())
+        buttons = [[InlineKeyboardButton(text=p["name"], callback_data=f"pdelid_{pid}")] for pid, p in sorted_products]
         await callback.message.answer("O'chirmoqchi bo'lgan mahsulotni tanlang:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
         await callback.answer()
 
@@ -1108,16 +1201,17 @@ def setup_ai_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("questions", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def ai_admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="🔄 Yangi suhbat"), KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📢 Xabar yuborish")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     def ai_user_kb():
-        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔄 Yangi suhbat")]], resize_keyboard=True)
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔄 Yangi suhbat")]] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def astart(message: Message):
@@ -1236,6 +1330,7 @@ def setup_post_bot(dp: Dispatcher, token: str):
     info.setdefault("welcome_text", "📢 Yangiliklarga obuna bo'ldingiz!")
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def admin_kb():
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -1247,7 +1342,7 @@ def setup_post_bot(dp: Dispatcher, token: str):
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="✏️ Salom xabarini sozlash")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def pstart(message: Message):
@@ -1372,13 +1467,14 @@ def setup_money_bot(dp: Dispatcher, token: str):
     info.setdefault("rates", {"USD": 12650, "EUR": 13700, "RUB": 140})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="➕ Valyuta qo'shish"), KeyboardButton(text="✏️ Kursni yangilash")],
             [KeyboardButton(text="🗑 Valyutani o'chirish"), KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     def currency_kb():
         buttons = [[InlineKeyboardButton(text=code, callback_data=f"curr_{code}")] for code in info["rates"]]
@@ -1533,6 +1629,7 @@ def setup_translate_bot(dp: Dispatcher, token: str):
     info.setdefault("user_lang", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     LANGS = {"uz": "🇺🇿 O'zbek", "en": "🇬🇧 English", "ru": "🇷🇺 Русский", "tr": "🇹🇷 Türkçe", "ar": "🇸🇦 العربية"}
 
@@ -1541,13 +1638,13 @@ def setup_translate_bot(dp: Dispatcher, token: str):
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
     def lang_chosen_kb():
-        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔄 Tilni o'zgartirish")]], resize_keyboard=True)
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔄 Tilni o'zgartirish")]] + get_global_button_rows(), resize_keyboard=True)
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="📊 Statistika"), KeyboardButton(text="📢 Xabar yuborish")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def tstart(message: Message):
@@ -1660,12 +1757,13 @@ def setup_contact_bot(dp: Dispatcher, token: str):
     info.setdefault("reply_map", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def cstart(message: Message):
@@ -1730,13 +1828,14 @@ def setup_survey_bot(dp: Dispatcher, token: str):
     info.setdefault("responses_data", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="➕ Savol qo'shish"), KeyboardButton(text="📋 Savollar")],
             [KeyboardButton(text="🗑 Savolni o'chirish"), KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def survstart(message: Message, state: FSMContext):
@@ -1839,15 +1938,16 @@ def setup_taxi_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("rides", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def user_kb():
-        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚕 Taxi chaqirish")]], resize_keyboard=True)
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚕 Taxi chaqirish")]] + get_global_button_rows(), resize_keyboard=True)
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def taxistart(message: Message):
@@ -1920,16 +2020,17 @@ def setup_test_bot(dp: Dispatcher, token: str):
     info.setdefault("test_questions", [])
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="➕ Savol qo'shish"), KeyboardButton(text="📋 Savollar")],
             [KeyboardButton(text="🗑 Savolni o'chirish"), KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
-        ], resize_keyboard=True)
+        ] + get_global_button_rows(), resize_keyboard=True)
 
     def user_kb():
-        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📝 Testni boshlash")]], resize_keyboard=True)
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📝 Testni boshlash")]] + get_global_button_rows(), resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def teststart(message: Message):
@@ -2076,6 +2177,25 @@ SETUP_FUNCTIONS = {
     "taxi": setup_taxi_bot,
     "test": setup_test_bot,
 }
+
+
+def get_global_button_rows():
+    return [[KeyboardButton(text=b["label"])] for b in data.get("global_buttons", [])]
+
+
+def is_global_button_text(message: Message) -> bool:
+    if not message.text:
+        return False
+    return any(message.text == b["label"] for b in data.get("global_buttons", []))
+
+
+def setup_global_buttons_handler(dp: Dispatcher):
+    @dp.message(is_global_button_text)
+    async def global_button_handler(message: Message):
+        for b in data.get("global_buttons", []):
+            if b["label"] == message.text:
+                await message.answer(b["response"])
+                return
 
 
 async def start_child_bot(token: str, bot_type: str):
