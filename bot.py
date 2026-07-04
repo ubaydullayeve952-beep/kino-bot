@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatMemberStatus
 from aiogram.fsm.context import FSMContext
@@ -17,6 +17,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 MAIN_BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # bosh administrator (siz)
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")  # masalan: ravshan_uzz (@ belgisiz)
+
+
+def admin_contact_url() -> str:
+    if ADMIN_USERNAME:
+        return f"https://t.me/{ADMIN_USERNAME}"
+    return f"tg://user?id={ADMIN_ID}"
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 DATA_FILE = "bots_data.json"
@@ -40,7 +47,7 @@ BOT_TYPES = {
     "test": "🎓 Ta'lim/Test bot",
 }
 
-PRICES = {
+DEFAULT_PRICES = {
     "kino": 120_000,
     "ai": 120_000,
     "shop": 120_000,
@@ -71,6 +78,13 @@ def save_data():
 
 data = load_data()
 data.setdefault("next_bot_id", 1)
+data.setdefault("prices", dict(DEFAULT_PRICES))
+for _key, _val in DEFAULT_PRICES.items():
+    data["prices"].setdefault(_key, _val)
+
+
+def get_price(bot_type: str) -> int:
+    return data["prices"].get(bot_type, DEFAULT_PRICES.get(bot_type, 0))
 
 
 def is_active(info: dict) -> bool:
@@ -83,7 +97,7 @@ def is_active(info: dict) -> bool:
 
 def next_payment_amount(info: dict) -> int:
     """Birinchi to'lov — to'liq narx. Keyingi to'lovlar — 20 foiz."""
-    price = PRICES.get(info["type"], 0)
+    price = get_price(info["type"])
     if info.get("paid_until"):
         return int(price * MONTHLY_RATE)
     return price
@@ -108,6 +122,10 @@ class NewBotFlow(StatesGroup):
     waiting_token = State()
 
 
+class EditPrice(StatesGroup):
+    waiting_amount = State()
+
+
 class AddMovie(StatesGroup):
     waiting_code = State()
     waiting_desc = State()
@@ -117,7 +135,6 @@ class AddMovie(StatesGroup):
 class AddProduct(StatesGroup):
     waiting_name = State()
     waiting_price = State()
-    waiting_qty = State()
 
 
 class Checkout(StatesGroup):
@@ -134,10 +151,13 @@ class AddChannel(StatesGroup):
     waiting_username = State()
 
 
-class RateFlow(StatesGroup):
-    waiting_usd = State()
-    waiting_eur = State()
-    waiting_rub = State()
+class CurrencyAdd(StatesGroup):
+    waiting_code = State()
+    waiting_rate = State()
+
+
+class CurrencyUpdate(StatesGroup):
+    waiting_rate = State()
 
 
 class MoneyAmount(StatesGroup):
@@ -318,27 +338,29 @@ async def check_active(event, info: dict, admin_id: int) -> bool:
     uid = event.from_user.id
     amount = next_payment_amount(info)
     is_renewal = bool(info.get("paid_until"))
+    kb = None
     if is_admin(info, uid):
+        kb = contact_admin_kb()
         if is_renewal:
             text = (
                 f"⏳ <b>Oylik to'lov muddati tugadi.</b>\n\n"
                 f"Davom ettirish uchun: <b>{amount:,} so'm</b> (oylik, narxning 20%).\n\n"
-                "To'lovni amalga oshirish uchun platforma administratoriga murojaat qiling."
+                "To'lovni amalga oshirish uchun administrator bilan bog'laning."
             )
         else:
             text = (
                 f"⏳ <b>Bepul sinov muddati tugadi.</b>\n\n"
                 f"Ushbu bot ({BOT_TYPES.get(info['type'])}) boshlang'ich narxi: <b>{amount:,} so'm</b>.\n"
-                f"Keyingi oylardan boshlab: {int(PRICES.get(info['type'], 0) * MONTHLY_RATE):,} so'm/oy.\n\n"
-                "To'lovni amalga oshirish uchun platforma administratoriga murojaat qiling."
+                f"Keyingi oylardan boshlab: {int(get_price(info['type']) * MONTHLY_RATE):,} so'm/oy.\n\n"
+                "To'lovni amalga oshirish uchun administrator bilan bog'laning."
             )
     else:
         text = "🚧 Bot vaqtincha ishlamayapti."
     if isinstance(event, CallbackQuery):
-        await event.message.answer(text)
+        await event.message.answer(text, reply_markup=kb)
         await event.answer()
     else:
-        await event.answer(text)
+        await event.answer(text, reply_markup=kb)
     return False
 
 
@@ -440,8 +462,14 @@ def setup_subscription_handlers(dp: Dispatcher, token: str, admin_id: int):
 
 # ---------- Bosh (creator) bot — XALQ UCHUN OMMAVIY ----------
 def types_kb():
-    buttons = [[InlineKeyboardButton(text=f"{name} — {PRICES[key]:,} so'm/oy", callback_data=f"type_{key}")] for key, name in BOT_TYPES.items()]
+    buttons = [[InlineKeyboardButton(text=f"{name} — {get_price(key):,} so'm/oy", callback_data=f"type_{key}")] for key, name in BOT_TYPES.items()]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def contact_admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Admin bilan bog'lanish", url=admin_contact_url())]
+    ])
 
 
 @main_dp.message(Command("myid"))
@@ -451,20 +479,19 @@ async def myid_handler(message: Message):
 
 @main_dp.message(Command("start"))
 async def main_start(message: Message):
+    price_lines = "\n".join(f"{BOT_TYPES[key]} — {get_price(key):,} so'm" for key in BOT_TYPES)
     text = (
         "🤖 <b>Bot yaratuvchi platformaga xush kelibsiz!</b>\n\n"
         "Bu yerda bir necha daqiqada o'zingizga kerakli botni yaratishingiz mumkin.\n\n"
         "💳 <b>Boshlang'ich narxlar:</b>\n"
-        f"🎬 Kino bot — {PRICES['kino']:,} so'm\n"
-        f"🤖 AI-yordamchi bot — {PRICES['ai']:,} so'm\n"
-        f"🛒 Savdo bot — {PRICES['shop']:,} so'm\n"
-        f"📢 E'lon/Xabar bot — {PRICES['post']:,} so'm\n\n"
+        f"{price_lines}\n\n"
         f"📅 Keyingi oylardan boshlab — narxning atigi {int(MONTHLY_RATE*100)}%.\n"
         f"🎁 Har bir bot uchun {TRIAL_DAYS} kunlik BEPUL sinov muddati bor!\n\n"
+        "💳 To'lov usuli: administrator bilan bog'lanish\n\n"
         "Bot yaratish: /newbot\n"
         "Botlaringiz: /mybots"
     )
-    await message.answer(text)
+    await message.answer(text, reply_markup=contact_admin_kb())
 
 
 @main_dp.message(Command("newbot"))
@@ -532,6 +559,46 @@ async def newbot_type(callback: CallbackQuery, state: FSMContext):
     )
     await state.clear()
     await callback.answer()
+
+
+@main_dp.message(Command("prices"))
+async def prices_panel(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    buttons = [
+        [InlineKeyboardButton(text=f"{name} — {get_price(key):,} so'm", callback_data=f"editprice_{key}")]
+        for key, name in BOT_TYPES.items()
+    ]
+    await message.answer("💰 <b>Narxlarni boshqarish</b>\n\nO'zgartirish uchun tanlang:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@main_dp.callback_query(F.data.startswith("editprice_"))
+async def editprice_cb(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    bot_type = callback.data.split("_", 1)[1]
+    await state.update_data(edit_price_type=bot_type)
+    await callback.message.answer(
+        f"{BOT_TYPES[bot_type]} uchun yangi boshlang'ich narxni kiriting (so'm, faqat raqam):"
+    )
+    await state.set_state(EditPrice.waiting_amount)
+    await callback.answer()
+
+
+@main_dp.message(EditPrice.waiting_amount)
+async def editprice_save(message: Message, state: FSMContext):
+    try:
+        amount = int(message.text.strip().replace(" ", ""))
+    except ValueError:
+        await message.answer("❌ Faqat raqam kiriting.")
+        return
+    state_data = await state.get_data()
+    bot_type = state_data.get("edit_price_type")
+    if bot_type:
+        data["prices"][bot_type] = amount
+        save_data()
+        await message.answer(f"✅ {BOT_TYPES[bot_type]} narxi endi {amount:,} so'm.")
+    await state.clear()
 
 
 @main_dp.message(Command("mybots"))
@@ -843,23 +910,12 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         except ValueError:
             await message.answer("❌ Faqat raqam kiriting.")
             return
-        await state.update_data(price=price)
-        await message.answer("Sonini (nechta borligini) yozing:")
-        await state.set_state(AddProduct.waiting_qty)
-
-    @dp.message(AddProduct.waiting_qty)
-    async def padd_qty(message: Message, state: FSMContext):
-        try:
-            qty = int(message.text.strip())
-        except ValueError:
-            await message.answer("❌ Faqat raqam kiriting.")
-            return
         state_data = await state.get_data()
         pid = str(info["next_id"])
         info["next_id"] += 1
-        info["products"][pid] = {"name": state_data["name"], "price": state_data["price"], "qty": qty}
+        info["products"][pid] = {"name": state_data["name"], "price": price, "qty": 999999}
         save_data()
-        await message.answer(f"✅ Qo'shildi: {state_data['name']} — {state_data['price']:,} so'm ({qty} dona)")
+        await message.answer(f"✅ Qo'shildi: {state_data['name']} — {price:,} so'm")
         await state.clear()
 
         # Mavjud xaridorlarga yangilangan katalogni tabiiy ko'rinishda yuborish
@@ -940,6 +996,18 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         await callback.message.answer("🗑 Savat tozalandi.")
         await callback.answer()
 
+    def location_kb():
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="📍 Joylashuvni yuborish", request_location=True)]],
+            resize_keyboard=True, one_time_keyboard=True,
+        )
+
+    def contact_kb():
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="📞 Raqamni yuborish", request_contact=True)]],
+            resize_keyboard=True, one_time_keyboard=True,
+        )
+
     @dp.callback_query(F.data == "checkout")
     async def checkout_cb(callback: CallbackQuery, state: FSMContext):
         uid = str(callback.from_user.id)
@@ -947,19 +1015,36 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         if not cart:
             await callback.answer("Savat bo'sh.", show_alert=True)
             return
-        await callback.message.answer("📍 Yetkazib berish manzilingizni yozing:")
+        await callback.message.answer(
+            "📍 Yetkazib berish manzilini yuboring — pastdagi tugma orqali joylashuvingizni ulashing:",
+            reply_markup=location_kb(),
+        )
         await state.set_state(Checkout.waiting_address)
         await callback.answer()
 
-    @dp.message(Checkout.waiting_address)
-    async def checkout_address(message: Message, state: FSMContext):
-        await state.update_data(address=message.text.strip())
-        await message.answer("📞 Telefon raqamingizni yuboring:")
+    @dp.message(Checkout.waiting_address, F.location)
+    async def checkout_address_location(message: Message, state: FSMContext):
+        lat, lon = message.location.latitude, message.location.longitude
+        address = f"https://maps.google.com/?q={lat},{lon}"
+        await state.update_data(address=address)
+        await message.answer("📞 Endi telefon raqamingizni yuboring:", reply_markup=contact_kb())
         await state.set_state(Checkout.waiting_phone)
 
+    @dp.message(Checkout.waiting_address)
+    async def checkout_address_text(message: Message, state: FSMContext):
+        await state.update_data(address=message.text.strip())
+        await message.answer("📞 Endi telefon raqamingizni yuboring:", reply_markup=contact_kb())
+        await state.set_state(Checkout.waiting_phone)
+
+    @dp.message(Checkout.waiting_phone, F.contact)
+    async def checkout_phone_contact(message: Message, state: FSMContext):
+        await finalize_order(message, state, message.contact.phone_number)
+
     @dp.message(Checkout.waiting_phone)
-    async def checkout_phone(message: Message, state: FSMContext):
-        phone = message.text.strip()
+    async def checkout_phone_text(message: Message, state: FSMContext):
+        await finalize_order(message, state, message.text.strip())
+
+    async def finalize_order(message: Message, state: FSMContext, phone: str):
         state_data = await state.get_data()
         address = state_data.get("address", "-")
 
@@ -1000,7 +1085,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         })
         save_data()
 
-        await message.answer("✅ Buyurtmangiz qabul qilindi! Tez orada siz bilan bog'lanishadi.")
+        await message.answer("✅ Buyurtmangiz qabul qilindi! Tez orada siz bilan bog'lanishadi.", reply_markup=ReplyKeyboardRemove())
         await state.clear()
 
     @dp.message(F.text == "📜 Buyurtmalarim")
@@ -1290,16 +1375,14 @@ def setup_money_bot(dp: Dispatcher, token: str):
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
-            [KeyboardButton(text="💱 Kurslarni yangilash"), KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="➕ Valyuta qo'shish"), KeyboardButton(text="✏️ Kursni yangilash")],
+            [KeyboardButton(text="🗑 Valyutani o'chirish"), KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
         ], resize_keyboard=True)
 
     def currency_kb():
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🇺🇸 USD", callback_data="curr_USD")],
-            [InlineKeyboardButton(text="🇪🇺 EUR", callback_data="curr_EUR")],
-            [InlineKeyboardButton(text="🇷🇺 RUB", callback_data="curr_RUB")],
-        ])
+        buttons = [[InlineKeyboardButton(text=code, callback_data=f"curr_{code}")] for code in info["rates"]]
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
 
     @dp.message(Command("start"))
     async def mstart(message: Message):
@@ -1310,10 +1393,13 @@ def setup_money_bot(dp: Dispatcher, token: str):
         if not await check_active(message, info, admin_id):
             return
         if is_admin(info, uid):
-            rates_text = "\n".join(f"{c}: {r:,} so'm" for c, r in info["rates"].items())
+            rates_text = "\n".join(f"{c}: {r:,} so'm" for c, r in info["rates"].items()) or "Hozircha valyuta yo'q."
             await message.answer(f"💱 <b>Pul bot boshqaruvi</b>\n\nJoriy kurslar:\n{rates_text}", reply_markup=admin_kb())
             return
         if not await require_subscription(message, info, admin_id):
+            return
+        if not info["rates"]:
+            await message.answer("Hozircha valyutalar qo'shilmagan.")
             return
         await message.answer("💱 Valyutani tanlang:", reply_markup=currency_kb())
 
@@ -1323,46 +1409,96 @@ def setup_money_bot(dp: Dispatcher, token: str):
         if not is_admin(info, message.from_user.id):
             return
         await message.answer(
-            f"📊 <b>Statistika</b>\n\n👥 Foydalanuvchilar: {len(info['users'])}\n💱 Konvertatsiyalar: {info['stats']['conversions']}"
+            f"📊 <b>Statistika</b>\n\n👥 Foydalanuvchilar: {len(info['users'])}\n"
+            f"💱 Konvertatsiyalar: {info['stats']['conversions']}\n💰 Valyutalar soni: {len(info['rates'])}"
         )
 
-    @dp.message(F.text == "💱 Kurslarni yangilash")
-    async def rate_update_start(message: Message, state: FSMContext):
+    @dp.message(F.text == "➕ Valyuta qo'shish")
+    async def add_currency_start(message: Message, state: FSMContext):
         if not is_admin(info, message.from_user.id):
             return
-        await message.answer("1 USD necha so'm? (faqat raqam):")
-        await state.set_state(RateFlow.waiting_usd)
+        await message.answer("Valyuta kodini yozing (masalan: GBP, CNY, TRY, KZT):")
+        await state.set_state(CurrencyAdd.waiting_code)
 
-    @dp.message(RateFlow.waiting_usd)
-    async def rate_usd(message: Message, state: FSMContext):
+    @dp.message(CurrencyAdd.waiting_code)
+    async def add_currency_code(message: Message, state: FSMContext):
+        code = message.text.strip().upper()
+        if not code.isalpha() or len(code) > 6:
+            await message.answer("❌ Kodni to'g'ri kiriting (masalan: GBP).")
+            return
+        await state.update_data(code=code)
+        await message.answer(f"1 {code} necha so'm? (faqat raqam):")
+        await state.set_state(CurrencyAdd.waiting_rate)
+
+    @dp.message(CurrencyAdd.waiting_rate)
+    async def add_currency_rate(message: Message, state: FSMContext):
         try:
-            info["rates"]["USD"] = int(message.text.strip().replace(" ", ""))
+            rate = float(message.text.strip().replace(" ", "").replace(",", "."))
         except ValueError:
             await message.answer("❌ Faqat raqam kiriting.")
             return
-        await message.answer("1 EUR necha so'm?")
-        await state.set_state(RateFlow.waiting_eur)
-
-    @dp.message(RateFlow.waiting_eur)
-    async def rate_eur(message: Message, state: FSMContext):
-        try:
-            info["rates"]["EUR"] = int(message.text.strip().replace(" ", ""))
-        except ValueError:
-            await message.answer("❌ Faqat raqam kiriting.")
-            return
-        await message.answer("1 RUB necha so'm?")
-        await state.set_state(RateFlow.waiting_rub)
-
-    @dp.message(RateFlow.waiting_rub)
-    async def rate_rub(message: Message, state: FSMContext):
-        try:
-            info["rates"]["RUB"] = int(message.text.strip().replace(" ", ""))
-        except ValueError:
-            await message.answer("❌ Faqat raqam kiriting.")
-            return
+        state_data = await state.get_data()
+        code = state_data.get("code")
+        info["rates"][code] = rate
         save_data()
-        await message.answer("✅ Kurslar yangilandi.")
+        await message.answer(f"✅ {code} qo'shildi: 1 {code} = {rate:,} so'm")
         await state.clear()
+
+    @dp.message(F.text == "✏️ Kursni yangilash")
+    async def update_rate_start(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        if not info["rates"]:
+            await message.answer("Hozircha valyuta yo'q. Avval qo'shing.")
+            return
+        buttons = [[InlineKeyboardButton(text=f"{c} ({r:,})", callback_data=f"updrate_{c}")] for c, r in info["rates"].items()]
+        await message.answer("Qaysi valyuta kursini yangilaymiz?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    @dp.callback_query(F.data.startswith("updrate_"))
+    async def update_rate_pick(callback: CallbackQuery, state: FSMContext):
+        if not is_admin(info, callback.from_user.id):
+            return
+        code = callback.data.split("_", 1)[1]
+        await state.update_data(update_code=code)
+        await callback.message.answer(f"1 {code} uchun yangi kursni kiriting (so'm):")
+        await state.set_state(CurrencyUpdate.waiting_rate)
+        await callback.answer()
+
+    @dp.message(CurrencyUpdate.waiting_rate)
+    async def update_rate_save(message: Message, state: FSMContext):
+        try:
+            rate = float(message.text.strip().replace(" ", "").replace(",", "."))
+        except ValueError:
+            await message.answer("❌ Faqat raqam kiriting.")
+            return
+        state_data = await state.get_data()
+        code = state_data.get("update_code")
+        if code in info["rates"]:
+            info["rates"][code] = rate
+            save_data()
+            await message.answer(f"✅ {code} kursi yangilandi: {rate:,} so'm")
+        await state.clear()
+
+    @dp.message(F.text == "🗑 Valyutani o'chirish")
+    async def del_currency_start(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        if not info["rates"]:
+            await message.answer("O'chirish uchun valyuta yo'q.")
+            return
+        buttons = [[InlineKeyboardButton(text=c, callback_data=f"delcurr_{c}")] for c in info["rates"]]
+        await message.answer("O'chirmoqchi bo'lgan valyutani tanlang:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    @dp.callback_query(F.data.startswith("delcurr_"))
+    async def del_currency_cb(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        code = callback.data.split("_", 1)[1]
+        removed = info["rates"].pop(code, None)
+        save_data()
+        if removed is not None:
+            await callback.message.answer(f"🗑 {code} o'chirildi.")
+        await callback.answer()
 
     @dp.callback_query(F.data.startswith("curr_"))
     async def pick_currency(callback: CallbackQuery, state: FSMContext):
