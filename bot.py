@@ -1,3 +1,4 @@
+
 import os
 import json
 import asyncio
@@ -6,8 +7,10 @@ import httpx
 from datetime import datetime, timedelta
  
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.filters import Command, CommandObject
+from io import BytesIO
+import qrcode
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BufferedInputFile
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatMemberStatus
 from aiogram.fsm.context import FSMContext
@@ -924,7 +927,20 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             [InlineKeyboardButton(text="➕ Mahsulot qo'shish", callback_data="padd")],
             [InlineKeyboardButton(text="📦 Mahsulotlar ro'yxati", callback_data="plist")],
             [InlineKeyboardButton(text="➖ Mahsulotni o'chirish", callback_data="pdel")],
+            [InlineKeyboardButton(text="📱 QR-kodni qayta olish", callback_data="pqr")],
         ])
+ 
+    async def send_product_qr(chat_send_func, bot, pid, name):
+        me = await bot.get_me()
+        deep_link = f"https://t.me/{me.username}?start=buy_{pid}"
+        qr_img = qrcode.make(deep_link)
+        buf = BytesIO()
+        qr_img.save(buf, format="PNG")
+        buf.seek(0)
+        await chat_send_func(
+            BufferedInputFile(buf.read(), filename=f"qr_{pid}.png"),
+            caption=f"📱 <b>{name}</b> uchun QR-kod",
+        )
  
     def catalog_kb():
         buttons = []
@@ -972,7 +988,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         ] + get_global_button_rows(), resize_keyboard=True)
  
     @dp.message(Command("start"))
-    async def sstart(message: Message):
+    async def sstart(message: Message, command: CommandObject):
         uid = message.from_user.id
         if uid not in info["users"]:
             info["users"].append(uid)
@@ -985,6 +1001,23 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             return
         if not await require_subscription(message, info, admin_id):
             return
+ 
+        # QR-kod orqali kelgan bo'lsa — to'g'ridan-to'g'ri shu mahsulotni ko'rsatamiz
+        args = command.args
+        if args and args.startswith("buy_"):
+            pid = args.split("_", 1)[1]
+            product = info["products"].get(pid)
+            if product:
+                buttons = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=f"🛒 Sotib olish — {product['price']:,} so'm", callback_data=f"buy_{pid}")]
+                ])
+                await message.answer(
+                    f"📦 <b>{product['name']}</b>\n💰 {product['price']:,} so'm",
+                    reply_markup=buttons,
+                )
+                await message.answer("Pastdagi menyudan ham foydalanishingiz mumkin 👇", reply_markup=main_menu_kb())
+                return
+ 
         if not info["products"]:
             await message.answer("Hozircha mahsulotlar yo'q.", reply_markup=main_menu_kb())
         else:
@@ -1049,6 +1082,25 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         await message.answer(f"✅ Qo'shildi: {state_data['name']} — {price:,} so'm")
         await state.clear()
  
+        # QR kod yaratish — skanerlanganda to'g'ridan-to'g'ri shu mahsulotni ochadi
+        try:
+            me = await message.bot.get_me()
+            deep_link = f"https://t.me/{me.username}?start=buy_{pid}"
+            qr_img = qrcode.make(deep_link)
+            buf = BytesIO()
+            qr_img.save(buf, format="PNG")
+            buf.seek(0)
+            await message.answer_photo(
+                BufferedInputFile(buf.read(), filename=f"qr_{pid}.png"),
+                caption=(
+                    f"📱 <b>{state_data['name']}</b> uchun QR-kod\n\n"
+                    "Buni chop etib mahsulot yoniga qo'ying — xaridor skanerlaganda "
+                    "to'g'ridan-to'g'ri shu mahsulotga o'tadi."
+                ),
+            )
+        except Exception as e:
+            logging.error(f"QR kod xatosi: {e}")
+ 
         # Mavjud xaridorlarga yangilangan katalogni tabiiy ko'rinishda yuborish
         for uid in info["users"]:
             if is_admin(info, uid):
@@ -1096,6 +1148,29 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         save_data()
         if removed:
             await callback.message.answer(f"🗑 O'chirildi: {removed['name']}")
+        await callback.answer()
+ 
+    @dp.callback_query(F.data == "pqr")
+    async def pqr_cb(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        if not info["products"]:
+            await callback.message.answer("Mahsulotlar yo'q.")
+            await callback.answer()
+            return
+        sorted_products = sorted(info["products"].items(), key=lambda item: item[1]["name"].lower())
+        buttons = [[InlineKeyboardButton(text=p["name"], callback_data=f"pqrid_{pid}")] for pid, p in sorted_products]
+        await callback.message.answer("Qaysi mahsulot uchun QR kod kerak?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await callback.answer()
+ 
+    @dp.callback_query(F.data.startswith("pqrid_"))
+    async def pqrid_cb(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        pid = callback.data.split("_", 1)[1]
+        product = info["products"].get(pid)
+        if product:
+            await send_product_qr(callback.message.answer_photo, callback.bot, pid, product["name"])
         await callback.answer()
  
     @dp.callback_query(F.data.startswith("buy_"))
@@ -2925,4 +3000,3 @@ async def main():
  
 if __name__ == "__main__":
     asyncio.run(main())
- 
