@@ -7,10 +7,11 @@ import httpx
 from datetime import datetime, timedelta
  
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 from io import BytesIO
-import qrcode
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BufferedInputFile
+import numpy as np
+import cv2
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatMemberStatus
 from aiogram.fsm.context import FSMContext
@@ -77,7 +78,33 @@ MONTHLY_RATE = 0.2  # keyingi oylar uchun narxning 20 foizi (24,000 so'm/oy)
 running_bots = {}
  
  
+MONGO_URI = os.getenv("MONGO_URI", "")
+mongo_collection = None
+ 
+if MONGO_URI:
+    from pymongo import MongoClient
+    try:
+        mongo_client = MongoClient(MONGO_URI)
+        mongo_db = mongo_client["botcreator"]
+        mongo_collection = mongo_db["data"]
+        logging.info("MongoDB'ga ulanildi — ma'lumotlar doimiy saqlanadi.")
+    except Exception as e:
+        logging.error(f"MongoDB'ga ulanishda xato: {e}")
+        mongo_collection = None
+ 
+ 
 def load_data():
+    if mongo_collection is not None:
+        try:
+            doc = mongo_collection.find_one({"_id": "main"})
+            if doc:
+                doc.pop("_id", None)
+                return doc
+            return {"bots": {}, "next_bot_id": 1}
+        except Exception as e:
+            logging.error(f"MongoDB'dan o'qishda xato: {e}")
+            return {"bots": {}, "next_bot_id": 1}
+    # Zaxira variant: MongoDB sozlanmagan bo'lsa, oddiy fayl orqali ishlaydi
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -85,6 +112,15 @@ def load_data():
  
  
 def save_data():
+    if mongo_collection is not None:
+        try:
+            doc = dict(data)
+            doc["_id"] = "main"
+            mongo_collection.replace_one({"_id": "main"}, doc, upsert=True)
+            return
+        except Exception as e:
+            logging.error(f"MongoDB'ga yozishda xato: {e}")
+    # Zaxira variant
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
  
@@ -163,6 +199,7 @@ class AddMovie(StatesGroup):
 class AddProduct(StatesGroup):
     waiting_name = State()
     waiting_price = State()
+    waiting_barcode = State()
  
  
 class Checkout(StatesGroup):
@@ -918,6 +955,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
     admin_id = info["admin_id"]
     info["stats"].setdefault("orders", 0)
     info["stats"].setdefault("revenue", 0)
+    info.setdefault("barcode_map", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
     setup_global_buttons_handler(dp)
@@ -927,20 +965,25 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             [InlineKeyboardButton(text="➕ Mahsulot qo'shish", callback_data="padd")],
             [InlineKeyboardButton(text="📦 Mahsulotlar ro'yxati", callback_data="plist")],
             [InlineKeyboardButton(text="➖ Mahsulotni o'chirish", callback_data="pdel")],
-            [InlineKeyboardButton(text="📱 QR-kodni qayta olish", callback_data="pqr")],
         ])
  
-    async def send_product_qr(chat_send_func, bot, pid, name):
-        me = await bot.get_me()
-        deep_link = f"https://t.me/{me.username}?start=buy_{pid}"
-        qr_img = qrcode.make(deep_link)
-        buf = BytesIO()
-        qr_img.save(buf, format="PNG")
-        buf.seek(0)
-        await chat_send_func(
-            BufferedInputFile(buf.read(), filename=f"qr_{pid}.png"),
-            caption=f"📱 <b>{name}</b> uchun QR-kod",
-        )
+    async def decode_barcode(message: Message):
+        """Xabardagi rasmdan shtrix-kodni o'qishga harakat qiladi. Topilsa matnini, topilmasa None qaytaradi."""
+        file_bytes_io = await message.bot.download(message.photo[-1])
+        img_array = np.frombuffer(file_bytes_io.read(), dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        detector = cv2.barcode.BarcodeDetector()
+        ok, decoded_info, decoded_type, points = detector.detectAndDecode(img)
+        if ok and decoded_info:
+            for code in decoded_info:
+                if code:
+                    return code
+        # Agar shtrix-kod topilmasa, QR-kod bo'lishi ham mumkin — shuni ham sinab ko'ramiz
+        qr_detector = cv2.QRCodeDetector()
+        qr_data, _, _ = qr_detector.detectAndDecode(img)
+        return qr_data or None
  
     def catalog_kb():
         buttons = []
@@ -988,7 +1031,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         ] + get_global_button_rows(), resize_keyboard=True)
  
     @dp.message(Command("start"))
-    async def sstart(message: Message, command: CommandObject):
+    async def sstart(message: Message):
         uid = message.from_user.id
         if uid not in info["users"]:
             info["users"].append(uid)
@@ -1002,28 +1045,15 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         if not await require_subscription(message, info, admin_id):
             return
  
-        # QR-kod orqali kelgan bo'lsa — to'g'ridan-to'g'ri shu mahsulotni ko'rsatamiz
-        args = command.args
-        if args and args.startswith("buy_"):
-            pid = args.split("_", 1)[1]
-            product = info["products"].get(pid)
-            if product:
-                buttons = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=f"🛒 Sotib olish — {product['price']:,} so'm", callback_data=f"buy_{pid}")]
-                ])
-                await message.answer(
-                    f"📦 <b>{product['name']}</b>\n💰 {product['price']:,} so'm",
-                    reply_markup=buttons,
-                )
-                await message.answer("Pastdagi menyudan ham foydalanishingiz mumkin 👇", reply_markup=main_menu_kb())
-                return
- 
         if not info["products"]:
             await message.answer("Hozircha mahsulotlar yo'q.", reply_markup=main_menu_kb())
         else:
             kb = catalog_kb()
             await message.answer("🛍 Mahsulotlar:", reply_markup=kb)
             await message.answer("Pastdagi menyudan foydalaning 👇", reply_markup=main_menu_kb())
+        await message.answer(
+            "📷 Mahsulotning shtrix-kodi (yoki QR) rasmini yuborsangiz, men uni topib beraman!"
+        )
  
     @dp.message(F.text == "🛍 Mahsulotlar")
     async def show_catalog(message: Message):
@@ -1080,28 +1110,18 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         info["products"][pid] = {"name": state_data["name"], "price": price, "qty": 999999}
         save_data()
         await message.answer(f"✅ Qo'shildi: {state_data['name']} — {price:,} so'm")
+ 
+        await message.answer(
+            "📷 Endi shu mahsulotning shtrix-kodi (barcode) rasmini yuboring — "
+            "keyinchalik xaridor shu kodni suratga olsa, bot mahsulotni topib beradi.\n\n"
+            "Agar shtrix-kod yo'q bo'lsa, /skip deb yozing."
+        )
+        await state.update_data(pid=pid, name=state_data["name"])
+        await state.set_state(AddProduct.waiting_barcode)
+ 
+    async def finish_add_product(message: Message, state: FSMContext):
+        """Mahsulot qo'shish jarayonini yakunlab, mavjud xaridorlarga xabar beradi."""
         await state.clear()
- 
-        # QR kod yaratish — skanerlanganda to'g'ridan-to'g'ri shu mahsulotni ochadi
-        try:
-            me = await message.bot.get_me()
-            deep_link = f"https://t.me/{me.username}?start=buy_{pid}"
-            qr_img = qrcode.make(deep_link)
-            buf = BytesIO()
-            qr_img.save(buf, format="PNG")
-            buf.seek(0)
-            await message.answer_photo(
-                BufferedInputFile(buf.read(), filename=f"qr_{pid}.png"),
-                caption=(
-                    f"📱 <b>{state_data['name']}</b> uchun QR-kod\n\n"
-                    "Buni chop etib mahsulot yoniga qo'ying — xaridor skanerlaganda "
-                    "to'g'ridan-to'g'ri shu mahsulotga o'tadi."
-                ),
-            )
-        except Exception as e:
-            logging.error(f"QR kod xatosi: {e}")
- 
-        # Mavjud xaridorlarga yangilangan katalogni tabiiy ko'rinishda yuborish
         for uid in info["users"]:
             if is_admin(info, uid):
                 continue
@@ -1111,6 +1131,34 @@ def setup_shop_bot(dp: Dispatcher, token: str):
                     await message.bot.send_message(uid, "🛍 Mahsulotlar:", reply_markup=kb)
             except Exception:
                 pass
+ 
+    @dp.message(AddProduct.waiting_barcode, F.photo)
+    async def padd_barcode_photo(message: Message, state: FSMContext):
+        state_data = await state.get_data()
+        pid = state_data.get("pid")
+        name = state_data.get("name")
+        try:
+            code = await decode_barcode(message)
+        except Exception as e:
+            logging.error(f"Shtrix-kod o'qishda xato: {e}")
+            code = None
+        if not code:
+            await message.answer("❌ Shtrix-kod aniqlanmadi. Aniqroq, yorug'roq surat yuboring yoki /skip deb yozing.")
+            return
+        info["barcode_map"][code] = pid
+        info["products"][pid]["barcode"] = code
+        save_data()
+        await message.answer(f"✅ Shtrix-kod bog'landi: {name} ({code})")
+        await finish_add_product(message, state)
+ 
+    @dp.message(AddProduct.waiting_barcode, Command("skip"))
+    async def padd_barcode_skip(message: Message, state: FSMContext):
+        await message.answer("⏭ Shtrix-kodsiz saqlandi.")
+        await finish_add_product(message, state)
+ 
+    @dp.message(AddProduct.waiting_barcode)
+    async def padd_barcode_wrong(message: Message):
+        await message.answer("❌ Iltimos, shtrix-kod rasmini yuboring yoki /skip deb yozing.")
  
     @dp.callback_query(F.data == "plist")
     async def plist_cb(callback: CallbackQuery):
@@ -1150,28 +1198,30 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             await callback.message.answer(f"🗑 O'chirildi: {removed['name']}")
         await callback.answer()
  
-    @dp.callback_query(F.data == "pqr")
-    async def pqr_cb(callback: CallbackQuery):
-        if not is_admin(info, callback.from_user.id):
+    @dp.message(F.photo)
+    async def scan_barcode_photo(message: Message):
+        """Har qanday foydalanuvchi (admin yoki xaridor) shtrix-kod/QR surat yuborsa, mahsulotni topib beradi."""
+        if not await check_active(message, info, admin_id):
             return
-        if not info["products"]:
-            await callback.message.answer("Mahsulotlar yo'q.")
-            await callback.answer()
+        if not await require_subscription(message, info, admin_id):
             return
-        sorted_products = sorted(info["products"].items(), key=lambda item: item[1]["name"].lower())
-        buttons = [[InlineKeyboardButton(text=p["name"], callback_data=f"pqrid_{pid}")] for pid, p in sorted_products]
-        await callback.message.answer("Qaysi mahsulot uchun QR kod kerak?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-        await callback.answer()
- 
-    @dp.callback_query(F.data.startswith("pqrid_"))
-    async def pqrid_cb(callback: CallbackQuery):
-        if not is_admin(info, callback.from_user.id):
+        try:
+            code = await decode_barcode(message)
+        except Exception as e:
+            logging.error(f"Shtrix-kod o'qishda xato: {e}")
+            code = None
+        if not code:
+            await message.answer("❌ Kod aniqlanmadi. Aniqroq, yorug'roq surat yuboring.")
             return
-        pid = callback.data.split("_", 1)[1]
-        product = info["products"].get(pid)
-        if product:
-            await send_product_qr(callback.message.answer_photo, callback.bot, pid, product["name"])
-        await callback.answer()
+        pid = info["barcode_map"].get(code)
+        product = info["products"].get(pid) if pid else None
+        if not product:
+            await message.answer(f"❌ Bu kodga ({code}) mos mahsulot topilmadi.")
+            return
+        buttons = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"🛒 Sotib olish — {product['price']:,} so'm", callback_data=f"buy_{pid}")]
+        ])
+        await message.answer(f"📦 <b>{product['name']}</b>\n💰 {product['price']:,} so'm", reply_markup=buttons)
  
     @dp.callback_query(F.data.startswith("buy_"))
     async def buy_cb(callback: CallbackQuery):
