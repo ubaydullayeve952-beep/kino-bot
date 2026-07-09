@@ -8,8 +8,6 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from io import BytesIO
-import numpy as np
-import cv2
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatMemberStatus
@@ -201,7 +199,6 @@ class AddMovie(StatesGroup):
 class AddProduct(StatesGroup):
     waiting_name = State()
     waiting_price = State()
-    waiting_barcode = State()
  
  
 class Checkout(StatesGroup):
@@ -558,6 +555,16 @@ def contact_admin_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Admin bilan bog'lanish", url=admin_contact_url())]
     ])
+ 
+ 
+@main_dp.message(Command("cancel"))
+async def main_cancel(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Bekor qilinadigan jarayon yo'q.")
+        return
+    await state.clear()
+    await message.answer("❌ Jarayon bekor qilindi.")
  
  
 @main_dp.message(Command("myid"))
@@ -957,7 +964,6 @@ def setup_shop_bot(dp: Dispatcher, token: str):
     admin_id = info["admin_id"]
     info["stats"].setdefault("orders", 0)
     info["stats"].setdefault("revenue", 0)
-    info.setdefault("barcode_map", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
     setup_global_buttons_handler(dp)
@@ -968,24 +974,6 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             [InlineKeyboardButton(text="📦 Mahsulotlar ro'yxati", callback_data="plist")],
             [InlineKeyboardButton(text="➖ Mahsulotni o'chirish", callback_data="pdel")],
         ])
- 
-    async def decode_barcode(message: Message):
-        """Xabardagi rasmdan shtrix-kodni o'qishga harakat qiladi. Topilsa matnini, topilmasa None qaytaradi."""
-        file_bytes_io = await message.bot.download(message.photo[-1])
-        img_array = np.frombuffer(file_bytes_io.read(), dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        if img is None:
-            return None
-        detector = cv2.barcode.BarcodeDetector()
-        ok, decoded_info, decoded_type, points = detector.detectAndDecode(img)
-        if ok and decoded_info:
-            for code in decoded_info:
-                if code:
-                    return code
-        # Agar shtrix-kod topilmasa, QR-kod bo'lishi ham mumkin — shuni ham sinab ko'ramiz
-        qr_detector = cv2.QRCodeDetector()
-        qr_data, _, _ = qr_detector.detectAndDecode(img)
-        return qr_data or None
  
     def catalog_kb():
         buttons = []
@@ -1053,9 +1041,6 @@ def setup_shop_bot(dp: Dispatcher, token: str):
             kb = catalog_kb()
             await message.answer("🛍 Mahsulotlar:", reply_markup=kb)
             await message.answer("Pastdagi menyudan foydalaning 👇", reply_markup=main_menu_kb())
-        await message.answer(
-            "📷 Mahsulotning shtrix-kodi (yoki QR) rasmini yuborsangiz, men uni topib beraman!"
-        )
  
     @dp.message(F.text == "🛍 Mahsulotlar")
     async def show_catalog(message: Message):
@@ -1112,18 +1097,9 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         info["products"][pid] = {"name": state_data["name"], "price": price, "qty": 999999}
         save_data()
         await message.answer(f"✅ Qo'shildi: {state_data['name']} — {price:,} so'm")
- 
-        await message.answer(
-            "📷 Endi shu mahsulotning shtrix-kodi (barcode) rasmini yuboring — "
-            "keyinchalik xaridor shu kodni suratga olsa, bot mahsulotni topib beradi.\n\n"
-            "Agar shtrix-kod yo'q bo'lsa, /skip deb yozing."
-        )
-        await state.update_data(pid=pid, name=state_data["name"])
-        await state.set_state(AddProduct.waiting_barcode)
- 
-    async def finish_add_product(message: Message, state: FSMContext):
-        """Mahsulot qo'shish jarayonini yakunlab, mavjud xaridorlarga xabar beradi."""
         await state.clear()
+ 
+        # Mavjud xaridorlarga yangilangan katalogni tabiiy ko'rinishda yuborish
         for uid in info["users"]:
             if is_admin(info, uid):
                 continue
@@ -1133,34 +1109,6 @@ def setup_shop_bot(dp: Dispatcher, token: str):
                     await message.bot.send_message(uid, "🛍 Mahsulotlar:", reply_markup=kb)
             except Exception:
                 pass
- 
-    @dp.message(AddProduct.waiting_barcode, F.photo)
-    async def padd_barcode_photo(message: Message, state: FSMContext):
-        state_data = await state.get_data()
-        pid = state_data.get("pid")
-        name = state_data.get("name")
-        try:
-            code = await decode_barcode(message)
-        except Exception as e:
-            logging.error(f"Shtrix-kod o'qishda xato: {e}")
-            code = None
-        if not code:
-            await message.answer("❌ Shtrix-kod aniqlanmadi. Aniqroq, yorug'roq surat yuboring yoki /skip deb yozing.")
-            return
-        info["barcode_map"][code] = pid
-        info["products"][pid]["barcode"] = code
-        save_data()
-        await message.answer(f"✅ Shtrix-kod bog'landi: {name} ({code})")
-        await finish_add_product(message, state)
- 
-    @dp.message(AddProduct.waiting_barcode, Command("skip"))
-    async def padd_barcode_skip(message: Message, state: FSMContext):
-        await message.answer("⏭ Shtrix-kodsiz saqlandi.")
-        await finish_add_product(message, state)
- 
-    @dp.message(AddProduct.waiting_barcode)
-    async def padd_barcode_wrong(message: Message):
-        await message.answer("❌ Iltimos, shtrix-kod rasmini yuboring yoki /skip deb yozing.")
  
     @dp.callback_query(F.data == "plist")
     async def plist_cb(callback: CallbackQuery):
@@ -1199,31 +1147,6 @@ def setup_shop_bot(dp: Dispatcher, token: str):
         if removed:
             await callback.message.answer(f"🗑 O'chirildi: {removed['name']}")
         await callback.answer()
- 
-    @dp.message(F.photo)
-    async def scan_barcode_photo(message: Message):
-        """Har qanday foydalanuvchi (admin yoki xaridor) shtrix-kod/QR surat yuborsa, mahsulotni topib beradi."""
-        if not await check_active(message, info, admin_id):
-            return
-        if not await require_subscription(message, info, admin_id):
-            return
-        try:
-            code = await decode_barcode(message)
-        except Exception as e:
-            logging.error(f"Shtrix-kod o'qishda xato: {e}")
-            code = None
-        if not code:
-            await message.answer("❌ Kod aniqlanmadi. Aniqroq, yorug'roq surat yuboring.")
-            return
-        pid = info["barcode_map"].get(code)
-        product = info["products"].get(pid) if pid else None
-        if not product:
-            await message.answer(f"❌ Bu kodga ({code}) mos mahsulot topilmadi.")
-            return
-        buttons = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"🛒 Sotib olish — {product['price']:,} so'm", callback_data=f"buy_{pid}")]
-        ])
-        await message.answer(f"📦 <b>{product['name']}</b>\n💰 {product['price']:,} so'm", reply_markup=buttons)
  
     @dp.callback_query(F.data.startswith("buy_"))
     async def buy_cb(callback: CallbackQuery):
@@ -3015,7 +2938,9 @@ SETUP_FUNCTIONS = {
  
  
 def get_global_button_rows():
-    return [[KeyboardButton(text=b["label"])] for b in data.get("global_buttons", [])]
+    rows = [[KeyboardButton(text="◀️ Orqaga")]]
+    rows += [[KeyboardButton(text=b["label"])] for b in data.get("global_buttons", [])]
+    return rows
  
  
 def is_global_button_text(message: Message) -> bool:
@@ -3025,6 +2950,15 @@ def is_global_button_text(message: Message) -> bool:
  
  
 def setup_global_buttons_handler(dp: Dispatcher):
+    @dp.message(F.text == "◀️ Orqaga")
+    async def back_button_handler(message: Message, state: FSMContext):
+        current_state = await state.get_state()
+        if current_state is not None:
+            await state.clear()
+            await message.answer("🔙 Bekor qilindi. Bosh menyuga qaytish uchun /start bosing.")
+        else:
+            await message.answer("🏠 Bosh menyuga qaytish uchun /start bosing.")
+ 
     @dp.message(is_global_button_text)
     async def global_button_handler(message: Message):
         for b in data.get("global_buttons", []):
@@ -3052,4 +2986,5 @@ async def main():
  
 if __name__ == "__main__":
     asyncio.run(main())
+   
 
