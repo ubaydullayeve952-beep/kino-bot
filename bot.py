@@ -842,9 +842,10 @@ async def mybots(message: Message):
         kb = None
         if uid == ADMIN_ID:
             amount = next_payment_amount(info)
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"✅ To'lovni tasdiqlash ({amount:,} so'm)", callback_data=f"activate_{info['id']}")]
-            ])
+            buttons = [[InlineKeyboardButton(text=f"✅ To'lovni tasdiqlash ({amount:,} so'm)", callback_data=f"activate_{info['id']}")]]
+            if info.get("paid_until"):
+                buttons.append([InlineKeyboardButton(text="❌ Tasdiqdan chiqarish", callback_data=f"deactivate_{info['id']}")])
+            kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer(text, reply_markup=kb)
 
 
@@ -862,6 +863,20 @@ async def activate_cb(callback: CallbackQuery):
     await callback.answer()
 
 
+@main_dp.callback_query(F.data.startswith("deactivate_"))
+async def deactivate_cb(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    bot_id = int(callback.data.split("_", 1)[1])
+    for token, info in data["bots"].items():
+        if info.get("id") == bot_id:
+            info["paid_until"] = None
+            save_data()
+            await callback.message.answer(f"❌ {info['name']} bot tasdiqdan chiqarildi (to'lov holati bekor qilindi).")
+            break
+    await callback.answer()
+
+
 # ---------- Kino bot ----------
 def setup_kino_bot(dp: Dispatcher, token: str):
     info = data["bots"][token]
@@ -869,7 +884,7 @@ def setup_kino_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("requests", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: kstart(m))
 
     def kino_admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -1004,7 +1019,7 @@ def setup_shop_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("revenue", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: sstart(m))
 
     def admin_kb():
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -1329,7 +1344,7 @@ def setup_ai_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("questions", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: astart(m))
 
     def ai_admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -1458,7 +1473,7 @@ def setup_post_bot(dp: Dispatcher, token: str):
     info.setdefault("welcome_text", "📢 Yangiliklarga obuna bo'ldingiz!")
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: pstart(m))
 
     def admin_kb():
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -1595,7 +1610,7 @@ def setup_money_bot(dp: Dispatcher, token: str):
     info.setdefault("rates", {"USD": 12650, "EUR": 13700, "RUB": 140})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: mstart(m))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -1757,7 +1772,7 @@ def setup_translate_bot(dp: Dispatcher, token: str):
     info.setdefault("user_lang", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: tstart(m))
 
     LANGS = {"uz": "🇺🇿 O'zbek", "en": "🇬🇧 English", "ru": "🇷🇺 Русский", "tr": "🇹🇷 Türkçe", "ar": "🇸🇦 العربية"}
 
@@ -1885,7 +1900,7 @@ def setup_contact_bot(dp: Dispatcher, token: str):
     info.setdefault("reply_map", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: cstart(m))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -1956,7 +1971,7 @@ def setup_survey_bot(dp: Dispatcher, token: str):
     info.setdefault("responses_data", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: survstart(m, s))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -2066,7 +2081,7 @@ def setup_taxi_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("rides", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: taxistart(m))
 
     def user_kb():
         return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚕 Taxi chaqirish")]] + get_global_button_rows(), resize_keyboard=True)
@@ -2148,7 +2163,7 @@ def setup_test_bot(dp: Dispatcher, token: str):
     info.setdefault("test_questions", [])
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: teststart(m))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -2301,7 +2316,7 @@ def setup_fitness_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("plans_generated", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: fstart(m))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -2488,7 +2503,7 @@ def setup_prayer_bot(dp: Dispatcher, token: str):
     info.setdefault("user_city", {})
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: praystart(m, s))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -2612,7 +2627,7 @@ def setup_weather_bot(dp: Dispatcher, token: str):
     info["stats"].setdefault("lookups", 0)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: wstart(m))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -2692,7 +2707,7 @@ def setup_football_bot(dp: Dispatcher, token: str):
     info.setdefault("matches", [])
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: fbstart(m))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -2821,7 +2836,7 @@ def setup_cars_bot(dp: Dispatcher, token: str):
     info.setdefault("next_ad_id", 1)
     setup_subscription_handlers(dp, token, admin_id)
     setup_admin_management(dp, token)
-    setup_global_buttons_handler(dp)
+    setup_global_buttons_handler(dp, lambda m, s: carstart(m))
 
     def admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
@@ -2987,13 +3002,12 @@ def is_global_button_text(message: Message) -> bool:
     return any(message.text == b["label"] for b in data.get("global_buttons", []))
 
 
-def setup_global_buttons_handler(dp: Dispatcher):
+def setup_global_buttons_handler(dp: Dispatcher, start_func=None):
     @dp.message(F.text == "◀️ Orqaga")
     async def back_button_handler(message: Message, state: FSMContext):
-        current_state = await state.get_state()
-        if current_state is not None:
-            await state.clear()
-            await message.answer("🔙 Bekor qilindi. Bosh menyuga qaytish uchun /start bosing.")
+        await state.clear()
+        if start_func:
+            await start_func(message, state)
         else:
             await message.answer("🏠 Bosh menyuga qaytish uchun /start bosing.")
 
