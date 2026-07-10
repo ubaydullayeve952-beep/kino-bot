@@ -2467,4 +2467,597 @@ def setup_fitness_bot(dp: Dispatcher, token: str):
             await thinking.edit_text(tips)
         except Exception as e:
             logging.error(f"Xatolik: {e}")
-            await think
+            await thinking.edit_text("Xatolik yuz berdi.")
+
+
+# ---------- Namoz vaqtlari bot ----------
+async def fetch_prayer_times(city: str, country: str = "Uzbekistan") -> dict:
+    url = "https://api.aladhan.com/v1/timingsByCity"
+    params = {"city": city, "country": country, "method": "2"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        result = resp.json()
+        return result["data"]["timings"]
+
+
+def setup_prayer_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+    admin_id = info["admin_id"]
+    info["stats"].setdefault("requests", 0)
+    info.setdefault("user_city", {})
+    setup_subscription_handlers(dp, token, admin_id)
+    setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
+
+    def admin_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="📊 Statistika"), KeyboardButton(text="📢 Xabar yuborish")],
+            [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
+        ], resize_keyboard=True)
+
+    def user_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="🕌 Bugungi namoz vaqtlari")],
+            [KeyboardButton(text="📍 Shahrimni o'zgartirish")],
+        ], resize_keyboard=True)
+
+    @dp.message(Command("start"))
+    async def praystart(message: Message, state: FSMContext):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        if not await check_active(message, info, admin_id):
+            return
+        if is_admin(info, uid):
+            await message.answer("🕌 <b>Namoz vaqtlari bot boshqaruvi</b>", reply_markup=admin_kb())
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        if str(uid) not in info["user_city"]:
+            await message.answer("📍 Qaysi shahar uchun namoz vaqtlarini ko'rsataylik? (masalan: Tashkent)")
+            await state.set_state(CityFlow.waiting_city)
+            return
+        await message.answer("🕌 Namoz vaqtlari botiga xush kelibsiz!", reply_markup=user_kb())
+
+    @dp.message(Command("stats"))
+    @dp.message(F.text == "📊 Statistika")
+    async def prayer_stats(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        await message.answer(
+            f"📊 <b>Statistika</b>\n\n👥 Foydalanuvchilar: {len(info['users'])}\n"
+            f"🕌 So'rovlar: {info['stats']['requests']}"
+        )
+
+    @dp.message(F.text == "📢 Xabar yuborish")
+    async def p_newpost(message: Message, state: FSMContext):
+        if not is_admin(info, message.from_user.id):
+            return
+        await message.answer("E'lon matnini yuboring:")
+        await state.set_state(PostFlow.waiting_text)
+
+    @dp.message(PostFlow.waiting_text)
+    async def p_post_text(message: Message, state: FSMContext):
+        await state.update_data(text=message.text)
+        buttons = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Yuborish", callback_data="p_post_confirm")],
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="p_post_cancel")],
+        ])
+        await message.answer(f"{len(info['users'])} kishiga yuborilsinmi?\n\n{message.text}", reply_markup=buttons)
+        await state.set_state(PostFlow.waiting_confirm)
+
+    @dp.callback_query(F.data == "p_post_confirm", PostFlow.waiting_confirm)
+    async def p_post_confirm(callback: CallbackQuery, state: FSMContext):
+        state_data = await state.get_data()
+        text = state_data.get("text", "")
+        count = 0
+        for uid in info["users"]:
+            try:
+                await callback.bot.send_message(uid, text)
+                count += 1
+            except Exception:
+                pass
+        await callback.message.edit_text(f"✅ {count} kishiga yuborildi.")
+        await state.clear()
+        await callback.answer()
+
+    @dp.callback_query(F.data == "p_post_cancel", PostFlow.waiting_confirm)
+    async def p_post_cancel(callback: CallbackQuery, state: FSMContext):
+        await callback.message.edit_text("❌ Bekor qilindi.")
+        await state.clear()
+        await callback.answer()
+
+    @dp.message(F.text == "📍 Shahrimni o'zgartirish")
+    async def change_city_start(message: Message, state: FSMContext):
+        await message.answer("📍 Qaysi shahar uchun namoz vaqtlarini ko'rsataylik?")
+        await state.set_state(CityFlow.waiting_city)
+
+    @dp.message(CityFlow.waiting_city)
+    async def set_city(message: Message, state: FSMContext):
+        city = message.text.strip()
+        info["user_city"][str(message.from_user.id)] = city
+        save_data()
+        await message.answer(f"✅ Shahar saqlandi: {city}", reply_markup=user_kb())
+        await state.clear()
+
+    @dp.message(F.text == "🕌 Bugungi namoz vaqtlari")
+    async def get_prayer_times(message: Message):
+        city = info["user_city"].get(str(message.from_user.id), "Tashkent")
+        thinking = await message.answer("🕌 Vaqtlar olinmoqda...")
+        try:
+            timings = await fetch_prayer_times(city)
+            info["stats"]["requests"] += 1
+            save_data()
+            text = (
+                f"🕌 <b>{city}</b> uchun bugungi namoz vaqtlari:\n\n"
+                f"🌅 Bomdod (Fajr): {timings.get('Fajr')}\n"
+                f"☀️ Quyosh chiqishi: {timings.get('Sunrise')}\n"
+                f"🌞 Peshin (Dhuhr): {timings.get('Dhuhr')}\n"
+                f"🌇 Asr: {timings.get('Asr')}\n"
+                f"🌆 Shom (Maghrib): {timings.get('Maghrib')}\n"
+                f"🌙 Xufton (Isha): {timings.get('Isha')}"
+            )
+            await thinking.edit_text(text)
+        except Exception as e:
+            logging.error(f"Xatolik: {e}")
+            await thinking.edit_text("❌ Vaqtlarni olishda xatolik. Shahar nomini to'g'ri kiriting (masalan: Tashkent, Samarkand).")
+
+
+# ---------- Ob-havo bot ----------
+def setup_weather_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+    admin_id = info["admin_id"]
+    info["stats"].setdefault("lookups", 0)
+    setup_subscription_handlers(dp, token, admin_id)
+    setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
+
+    def admin_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
+        ], resize_keyboard=True)
+
+    def user_kb():
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🌤 Ob-havoni bilish")]], resize_keyboard=True)
+
+    async def fetch_weather(city: str):
+        url = f"https://wttr.in/{city}?format=j1"
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers={"User-Agent": "curl"})
+            resp.raise_for_status()
+            return resp.json()
+
+    @dp.message(Command("start"))
+    async def wstart(message: Message):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        if not await check_active(message, info, admin_id):
+            return
+        if is_admin(info, uid):
+            await message.answer("🌤 <b>Ob-havo bot boshqaruvi</b>", reply_markup=admin_kb())
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        await message.answer("🌤 Ob-havo botiga xush kelibsiz!", reply_markup=user_kb())
+
+    @dp.message(Command("stats"))
+    @dp.message(F.text == "📊 Statistika")
+    async def weather_stats(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        await message.answer(
+            f"📊 <b>Statistika</b>\n\n👥 Foydalanuvchilar: {len(info['users'])}\n🌤 So'rovlar: {info['stats']['lookups']}"
+        )
+
+    @dp.message(F.text == "🌤 Ob-havoni bilish")
+    async def ask_city(message: Message, state: FSMContext):
+        if not await check_active(message, info, admin_id):
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        await message.answer("Shahar nomini yozing (masalan: Tashkent):")
+        await state.set_state(WeatherCity.waiting_city)
+
+    @dp.message(WeatherCity.waiting_city)
+    async def show_weather(message: Message, state: FSMContext):
+        city = message.text.strip()
+        try:
+            d = await fetch_weather(city)
+            cur = d["current_condition"][0]
+            temp = cur["temp_C"]
+            desc = cur["weatherDesc"][0]["value"]
+            humidity = cur["humidity"]
+            wind = cur["windspeedKmph"]
+            info["stats"]["lookups"] += 1
+            save_data()
+            await message.answer(
+                f"🌤 <b>{city}</b>\n\n🌡 Harorat: {temp}°C\n☁️ Holat: {desc}\n💧 Namlik: {humidity}%\n💨 Shamol: {wind} km/soat"
+            )
+        except Exception as e:
+            logging.error(f"Xatolik: {e}")
+            await message.answer("❌ Ob-havo ma'lumotini olishda xatolik. Shahar nomini tekshirib qayta urinib ko'ring.")
+        await state.clear()
+
+
+# ---------- Futbol natijalar bot ----------
+def setup_football_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+    admin_id = info["admin_id"]
+    info["stats"].setdefault("views", 0)
+    info.setdefault("matches", [])
+    setup_subscription_handlers(dp, token, admin_id)
+    setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
+
+    def admin_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="➕ Natija qo'shish"), KeyboardButton(text="📋 Natijalar")],
+            [KeyboardButton(text="🗑 Natijani o'chirish"), KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
+        ], resize_keyboard=True)
+
+    def user_kb():
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⚽ Natijalar")]], resize_keyboard=True)
+
+    @dp.message(Command("start"))
+    async def fbstart(message: Message):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        if not await check_active(message, info, admin_id):
+            return
+        if is_admin(info, uid):
+            await message.answer("⚽ <b>Futbol natijalar bot boshqaruvi</b>", reply_markup=admin_kb())
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        await message.answer("⚽ Futbol natijalar botiga xush kelibsiz!", reply_markup=user_kb())
+
+    @dp.message(Command("stats"))
+    @dp.message(F.text == "📊 Statistika")
+    async def football_stats(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        await message.answer(
+            f"📊 <b>Statistika</b>\n\n👥 Foydalanuvchilar: {len(info['users'])}\n"
+            f"👀 Ko'rishlar: {info['stats']['views']}\n⚽ Natijalar soni: {len(info['matches'])}"
+        )
+
+    @dp.message(F.text == "➕ Natija qo'shish")
+    async def add_match_start(message: Message, state: FSMContext):
+        if not is_admin(info, message.from_user.id):
+            return
+        await message.answer("Jamoalarni yozing (masalan: Pakhtakor - Bunyodkor):")
+        await state.set_state(FootballAdmin.waiting_match)
+
+    @dp.message(FootballAdmin.waiting_match)
+    async def add_match_teams(message: Message, state: FSMContext):
+        await state.update_data(match=message.text.strip())
+        await message.answer("Natijani yozing (masalan: 2:1):")
+        await state.set_state(FootballAdmin.waiting_score)
+
+    @dp.message(FootballAdmin.waiting_score)
+    async def add_match_score(message: Message, state: FSMContext):
+        await state.update_data(score=message.text.strip())
+        await message.answer("Sanani yozing (masalan: 05.07.2026):")
+        await state.set_state(FootballAdmin.waiting_date)
+
+    @dp.message(FootballAdmin.waiting_date)
+    async def add_match_date(message: Message, state: FSMContext):
+        state_data = await state.get_data()
+        info["matches"].append({
+            "match": state_data["match"], "score": state_data["score"], "date": message.text.strip()
+        })
+        save_data()
+        await message.answer("✅ Natija qo'shildi.")
+        await state.clear()
+
+    @dp.message(F.text == "📋 Natijalar")
+    async def list_matches_admin(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        if not info["matches"]:
+            await message.answer("Hozircha natijalar yo'q.")
+            return
+        text = "📋 <b>Barcha natijalar:</b>\n\n" + "\n".join(
+            f"{i+1}) {m['date']}: {m['match']} — {m['score']}" for i, m in enumerate(info["matches"])
+        )
+        await message.answer(text)
+
+    @dp.message(F.text == "🗑 Natijani o'chirish")
+    async def del_match_start(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        if not info["matches"]:
+            await message.answer("O'chirish uchun natija yo'q.")
+            return
+        buttons = [
+            [InlineKeyboardButton(text=f"{m['match']} ({m['score']})", callback_data=f"delmatch_{i}")]
+            for i, m in enumerate(info["matches"])
+        ]
+        await message.answer("O'chirmoqchi bo'lgan natijani tanlang:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    @dp.callback_query(F.data.startswith("delmatch_"))
+    async def del_match_cb(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        idx = int(callback.data.split("_", 1)[1])
+        if 0 <= idx < len(info["matches"]):
+            removed = info["matches"].pop(idx)
+            save_data()
+            await callback.message.answer(f"🗑 O'chirildi: {removed['match']}")
+        await callback.answer()
+
+    @dp.message(F.text == "⚽ Natijalar")
+    async def list_matches_user(message: Message):
+        if not await check_active(message, info, admin_id):
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        if not info["matches"]:
+            await message.answer("Hozircha natijalar yo'q.")
+            return
+        info["stats"]["views"] += 1
+        save_data()
+        text = "⚽ <b>So'nggi natijalar:</b>\n\n" + "\n".join(
+            f"{m['date']}: {m['match']} — {m['score']}" for m in info["matches"][-10:]
+        )
+        await message.answer(text)
+
+
+# ---------- Avtomobil e'lonlari bot ----------
+def setup_cars_bot(dp: Dispatcher, token: str):
+    info = data["bots"][token]
+    admin_id = info["admin_id"]
+    info["stats"].setdefault("ads_posted", 0)
+    info.setdefault("car_ads", {})
+    info.setdefault("pending_ads", {})
+    info.setdefault("next_ad_id", 1)
+    setup_subscription_handlers(dp, token, admin_id)
+    setup_admin_management(dp, token)
+    setup_global_buttons_handler(dp)
+
+    def admin_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="🚗 E'lonlar"), KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
+        ], resize_keyboard=True)
+
+    def user_kb():
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="🚗 E'lonlar"), KeyboardButton(text="➕ E'lon joylashtirish")],
+        ], resize_keyboard=True)
+
+    @dp.message(Command("start"))
+    async def carstart(message: Message):
+        uid = message.from_user.id
+        if uid not in info["users"]:
+            info["users"].append(uid)
+            save_data()
+        if not await check_active(message, info, admin_id):
+            return
+        if is_admin(info, uid):
+            await message.answer("🚗 <b>Avtomobil e'lonlari bot boshqaruvi</b>", reply_markup=admin_kb())
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        await message.answer("🚗 Avtomobil e'lonlari botiga xush kelibsiz!", reply_markup=user_kb())
+
+    @dp.message(Command("stats"))
+    @dp.message(F.text == "📊 Statistika")
+    async def cars_stats(message: Message):
+        if not is_admin(info, message.from_user.id):
+            return
+        await message.answer(
+            f"📊 <b>Statistika</b>\n\n👥 Foydalanuvchilar: {len(info['users'])}\n"
+            f"🚗 Chop etilgan e'lonlar: {info['stats']['ads_posted']}\n⏳ Kutilayotgan: {len(info['pending_ads'])}"
+        )
+
+    @dp.message(F.text == "➕ E'lon joylashtirish")
+    async def add_ad_start(message: Message, state: FSMContext):
+        if not await check_active(message, info, admin_id):
+            return
+        if not await require_subscription(message, info, admin_id):
+            return
+        await message.answer("Avtomobil markasi va modelini yozing (masalan: Chevrolet Cobalt):")
+        await state.set_state(CarAdFlow.waiting_brand)
+
+    @dp.message(CarAdFlow.waiting_brand)
+    async def ad_brand(message: Message, state: FSMContext):
+        await state.update_data(brand=message.text.strip())
+        await message.answer("Ishlab chiqarilgan yilini yozing:")
+        await state.set_state(CarAdFlow.waiting_year)
+
+    @dp.message(CarAdFlow.waiting_year)
+    async def ad_year(message: Message, state: FSMContext):
+        await state.update_data(year=message.text.strip())
+        await message.answer("Narxini yozing (so'mda):")
+        await state.set_state(CarAdFlow.waiting_price)
+
+    @dp.message(CarAdFlow.waiting_price)
+    async def ad_price(message: Message, state: FSMContext):
+        await state.update_data(price=message.text.strip())
+        await message.answer("Telefon raqamingizni yozing:")
+        await state.set_state(CarAdFlow.waiting_phone)
+
+    @dp.message(CarAdFlow.waiting_phone)
+    async def ad_phone(message: Message, state: FSMContext):
+        state_data = await state.get_data()
+        ad_id = str(info["next_ad_id"])
+        info["next_ad_id"] += 1
+        username = message.from_user.username or message.from_user.id
+        ad = {
+            "brand": state_data["brand"],
+            "year": state_data["year"],
+            "price": state_data["price"],
+            "phone": message.text.strip(),
+            "user_id": message.from_user.id,
+            "username": username,
+        }
+        info["pending_ads"][ad_id] = ad
+        save_data()
+        text = (
+            f"🚗 <b>Yangi e'lon (tasdiqlash kutilmoqda)</b>\n"
+            f"{ad['brand']}, {ad['year']}-yil\n💰 {ad['price']} so'm\n📞 {ad['phone']}\n👤 @{username}"
+        )
+        buttons = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"adok_{ad_id}"),
+            InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adno_{ad_id}"),
+        ]])
+        await message.bot.send_message(admin_id, text, reply_markup=buttons)
+        await message.answer("✅ E'loningiz yuborildi, admin tasdiqlagach e'lonlar ro'yxatida chiqadi.")
+        await state.clear()
+
+    @dp.callback_query(F.data.startswith("adok_"))
+    async def approve_ad(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        ad_id = callback.data.split("_", 1)[1]
+        ad = info["pending_ads"].pop(ad_id, None)
+        if ad:
+            info["car_ads"][ad_id] = ad
+            info["stats"]["ads_posted"] += 1
+            save_data()
+            try:
+                await callback.bot.send_message(ad["user_id"], "✅ E'loningiz tasdiqlandi va chop etildi!")
+            except Exception:
+                pass
+            await callback.message.answer("✅ Tasdiqlandi.")
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("adno_"))
+    async def reject_ad(callback: CallbackQuery):
+        if not is_admin(info, callback.from_user.id):
+            return
+        ad_id = callback.data.split("_", 1)[1]
+        ad = info["pending_ads"].pop(ad_id, None)
+        save_data()
+        if ad:
+            try:
+                await callback.bot.send_message(ad["user_id"], "❌ E'loningiz rad etildi.")
+            except Exception:
+                pass
+        await callback.message.answer("❌ Rad etildi.")
+        await callback.answer()
+
+    @dp.message(F.text == "🚗 E'lonlar")
+    async def list_ads(message: Message):
+        if not info["car_ads"]:
+            await message.answer("Hozircha e'lonlar yo'q.")
+            return
+        for ad_id, ad in list(info["car_ads"].items())[-10:]:
+            text = f"🚗 {ad['brand']}, {ad['year']}-yil\n💰 {ad['price']} so'm\n📞 {ad['phone']}"
+            await message.answer(text)
+
+
+SETUP_FUNCTIONS = {
+    "kino": setup_kino_bot,
+    "shop": setup_shop_bot,
+    "ai": setup_ai_bot,
+    "post": setup_post_bot,
+    "money": setup_money_bot,
+    "translate": setup_translate_bot,
+    "contact": setup_contact_bot,
+    "survey": setup_survey_bot,
+    "taxi": setup_taxi_bot,
+    "test": setup_test_bot,
+    "fitness": setup_fitness_bot,
+    "prayer": setup_prayer_bot,
+    "weather": setup_weather_bot,
+    "football": setup_football_bot,
+    "cars": setup_cars_bot,
+}
+
+
+def get_global_button_rows():
+    rows = [[KeyboardButton(text="◀️ Orqaga")]]
+    rows += [[KeyboardButton(text=b["label"])] for b in data.get("global_buttons", [])]
+    return rows
+
+
+def is_global_button_text(message: Message) -> bool:
+    if not message.text:
+        return False
+    return any(message.text == b["label"] for b in data.get("global_buttons", []))
+
+
+def setup_global_buttons_handler(dp: Dispatcher):
+    @dp.message(F.text == "◀️ Orqaga")
+    async def back_button_handler(message: Message, state: FSMContext):
+        current_state = await state.get_state()
+        if current_state is not None:
+            await state.clear()
+            await message.answer("🔙 Bekor qilindi. Bosh menyuga qaytish uchun /start bosing.")
+        else:
+            await message.answer("🏠 Bosh menyuga qaytish uchun /start bosing.")
+
+    @dp.message(is_global_button_text)
+    async def global_button_handler(message: Message):
+        for b in data.get("global_buttons", []):
+            if b["label"] == message.text:
+                await message.answer(b["response"])
+                return
+
+
+async def start_child_bot(token: str, bot_type: str):
+    if token in running_bots:
+        return
+    child_bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    child_dp = Dispatcher(storage=MemoryStorage())
+    SETUP_FUNCTIONS[bot_type](child_dp, token)
+    task = asyncio.create_task(child_dp.start_polling(child_bot))
+    running_bots[token] = task
+
+
+async def trial_warning_loop():
+    """Har 6 soatda barcha botlarni tekshirib, sinov/to'lov muddati tugashiga 1 kun qolganlarga ogohlantirish yuboradi."""
+    while True:
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            for token, info in data["bots"].items():
+                if info.get("paid_until"):
+                    expiry = datetime.fromisoformat(info["paid_until"])
+                    kind = "to'lov"
+                else:
+                    expiry = datetime.fromisoformat(info["created_at"]) + timedelta(days=TRIAL_DAYS)
+                    kind = "sinov"
+
+                days_left = (expiry - datetime.now()).total_seconds() / 86400
+                if 0 <= days_left <= 1 and info.get("last_warned_date") != today:
+                    amount = next_payment_amount(info)
+                    try:
+                        await main_bot.send_message(
+                            info["admin_id"],
+                            f"⏳ <b>Ogohlantirish!</b>\n\n"
+                            f"{BOT_TYPES.get(info['type'])} (<b>{info['name']}</b>) uchun {kind} muddati "
+                            f"taxminan 1 kundan keyin tugaydi.\n\n"
+                            f"Davom ettirish uchun to'lov: <b>{amount:,} so'm</b>.\n"
+                            "To'lovni amalga oshirish uchun administrator bilan bog'laning.",
+                            reply_markup=contact_admin_kb(),
+                        )
+                    except Exception as e:
+                        logging.error(f"Ogohlantirish yuborishda xato ({token}): {e}")
+                    info["last_warned_date"] = today
+                    save_data()
+        except Exception as e:
+            logging.error(f"trial_warning_loop xatosi: {e}")
+
+        await asyncio.sleep(6 * 60 * 60)  # 6 soat
+
+
+async def main():
+    for token, info in data["bots"].items():
+        info.setdefault("stats", {})
+        await start_child_bot(token, info["type"])
+    asyncio.create_task(trial_warning_loop())
+    await main_dp.start_polling(main_bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
