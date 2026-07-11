@@ -185,6 +185,10 @@ class EditRate(StatesGroup):
     waiting_percent = State()
 
 
+class ActivateFlow(StatesGroup):
+    waiting_days = State()
+
+
 class GlobalButtonAdd(StatesGroup):
     waiting_label = State()
     waiting_response = State()
@@ -203,6 +207,13 @@ class AddMovie(StatesGroup):
     waiting_code = State()
     waiting_desc = State()
     waiting_video = State()
+
+
+class AddSeries(StatesGroup):
+    waiting_code = State()
+    waiting_title = State()
+    waiting_desc = State()
+    waiting_episode = State()
 
 
 class AddProduct(StatesGroup):
@@ -850,17 +861,35 @@ async def mybots(message: Message):
 
 
 @main_dp.callback_query(F.data.startswith("activate_"))
-async def activate_cb(callback: CallbackQuery):
+async def activate_cb(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         return
     bot_id = int(callback.data.split("_", 1)[1])
+    await state.update_data(activate_bot_id=bot_id)
+    await callback.message.answer("Necha kunga faollashtirilsin? (masalan: 30):")
+    await state.set_state(ActivateFlow.waiting_days)
+    await callback.answer()
+
+
+@main_dp.message(ActivateFlow.waiting_days)
+async def activate_days_save(message: Message, state: FSMContext):
+    try:
+        days = int(message.text.strip())
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Musbat butun raqam kiriting (masalan: 30).")
+        return
+    state_data = await state.get_data()
+    bot_id = state_data.get("activate_bot_id")
     for token, info in data["bots"].items():
         if info.get("id") == bot_id:
-            info["paid_until"] = (datetime.now() + timedelta(days=30)).isoformat()
+            expiry = datetime.now() + timedelta(days=days)
+            info["paid_until"] = expiry.isoformat()
             save_data()
-            await callback.message.answer(f"✅ {info['name']} bot 30 kunga faollashtirildi.")
+            await message.answer(f"✅ {info['name']} bot {expiry.strftime('%d.%m.%Y')} sanagacha faollashtirildi.")
             break
-    await callback.answer()
+    await state.clear()
 
 
 @main_dp.callback_query(F.data.startswith("deactivate_"))
@@ -888,8 +917,9 @@ def setup_kino_bot(dp: Dispatcher, token: str):
 
     def kino_admin_kb():
         return ReplyKeyboardMarkup(keyboard=[
-            [KeyboardButton(text="🎬 Film qo'shish"), KeyboardButton(text="📋 Filmlar ro'yxati")],
-            [KeyboardButton(text="🗑 Film o'chirish"), KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="🎬 Film qo'shish"), KeyboardButton(text="📺 Serial qo'shish")],
+            [KeyboardButton(text="📋 Filmlar ro'yxati"), KeyboardButton(text="🗑 Film o'chirish")],
+            [KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="📡 Majburiy obuna"), KeyboardButton(text="👤 Adminlar")],
         ] + get_global_button_rows(), resize_keyboard=True)
 
@@ -929,6 +959,112 @@ def setup_kino_bot(dp: Dispatcher, token: str):
         await message.answer("Kino kodini yuboring (faqat raqam, masalan: 40):")
         await state.set_state(AddMovie.waiting_code)
 
+    @dp.message(F.text == "📺 Serial qo'shish")
+    async def addseries_cmd(message: Message, state: FSMContext):
+        if not is_admin(info, message.from_user.id):
+            return
+        await message.answer("Serial kodini yuboring (faqat raqam, masalan: 41):")
+        await state.set_state(AddSeries.waiting_code)
+
+    @dp.message(AddSeries.waiting_code)
+    async def addseries_code(message: Message, state: FSMContext):
+        code = message.text.strip()
+        if not code.isdigit():
+            await message.answer("❌ Kod faqat raqamlardan iborat bo'lishi kerak. Qaytadan yuboring:")
+            return
+        await state.update_data(code=code)
+        await message.answer("Serial nomini yozing (masalan: Umar ibn Xattob):")
+        await state.set_state(AddSeries.waiting_title)
+
+    @dp.message(AddSeries.waiting_title)
+    async def addseries_title(message: Message, state: FSMContext):
+        await state.update_data(title=message.text.strip())
+        await message.answer(
+            "Tavsif yozing (sifati, davlati, janri, tili, yili va h.k.):"
+        )
+        await state.set_state(AddSeries.waiting_desc)
+
+    @dp.message(AddSeries.waiting_desc)
+    async def addseries_desc(message: Message, state: FSMContext):
+        await state.update_data(desc=message.text.strip(), episodes={})
+        await message.answer(
+            "Endi 1-qism videosini yuboring.\n"
+            "Har bir videoni ketma-ket yuboraverasiz (avtomatik 1, 2, 3... deb raqamlanadi).\n"
+            "Barcha qismlarni yuborib bo'lgach, /done deb yozing."
+        )
+        await state.set_state(AddSeries.waiting_episode)
+
+    @dp.message(AddSeries.waiting_episode, F.video)
+    async def addseries_episode(message: Message, state: FSMContext):
+        state_data = await state.get_data()
+        episodes = state_data.get("episodes", {})
+        next_num = len(episodes) + 1
+        episodes[str(next_num)] = message.video.file_id
+        await state.update_data(episodes=episodes)
+        await message.answer(f"✅ {next_num}-qism saqlandi. Davom eting yoki /done deb tugating.")
+
+    @dp.message(AddSeries.waiting_episode, Command("done"))
+    async def addseries_done(message: Message, state: FSMContext):
+        state_data = await state.get_data()
+        episodes = state_data.get("episodes", {})
+        if not episodes:
+            await message.answer("❌ Kamida bitta qism yuborishingiz kerak.")
+            return
+        code = state_data["code"]
+        info["movies"][code] = {
+            "type": "series",
+            "title": state_data["title"],
+            "desc": state_data["desc"],
+            "episodes": episodes,
+        }
+        save_data()
+        await message.answer(
+            f"✅ Serial saqlandi: <b>{state_data['title']}</b> ({len(episodes)} qism), Kod: {code}"
+        )
+        await state.clear()
+
+    @dp.message(AddSeries.waiting_episode)
+    async def addseries_wrong(message: Message):
+        await message.answer("❌ Video yuboring yoki barcha qismlar tugagan bo'lsa /done deb yozing.")
+
+    async def send_series_episode(send_func, series: dict, code: str, ep_num: int):
+        episodes = series["episodes"]
+        sorted_eps = sorted(int(k) for k in episodes.keys())
+        total = len(sorted_eps)
+        file_id = episodes.get(str(ep_num))
+        caption = (
+            f"🎬 <b>{series['title']}</b>\n"
+            f"🆔 Kodi: {code}\n"
+            f"📁 Qism: {ep_num}/{total}\n\n"
+            f"{series.get('desc', '')}"
+        )
+        buttons = []
+        row = []
+        for n in sorted_eps:
+            label = f"• {n}-qism" if n == ep_num else f"{n}-qism"
+            row.append(InlineKeyboardButton(text=label, callback_data=f"ep_{code}_{n}"))
+            if len(row) == 4:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        next_ep = ep_num + 1
+        if next_ep in sorted_eps:
+            buttons.append([InlineKeyboardButton(text="Keyingi ▶️", callback_data=f"ep_{code}_{next_ep}")])
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await send_func(file_id, caption=caption, reply_markup=kb)
+
+    @dp.callback_query(F.data.startswith("ep_"))
+    async def episode_nav_cb(callback: CallbackQuery):
+        _, code, num_str = callback.data.split("_")
+        num = int(num_str)
+        series = info["movies"].get(code)
+        if not series or series.get("type") != "series":
+            await callback.answer("Topilmadi.", show_alert=True)
+            return
+        await send_series_episode(callback.message.answer_video, series, code, num)
+        await callback.answer()
+
     @dp.message(AddMovie.waiting_code)
     async def addmovie_code(message: Message, state: FSMContext):
         code = message.text.strip()
@@ -966,10 +1102,13 @@ def setup_kino_bot(dp: Dispatcher, token: str):
         if not info["movies"]:
             await message.answer("Hozircha filmlar yo'q.")
             return
-        text = "📋 <b>Filmlar:</b>\n\n" + "\n".join(
-            f"• Kod {code}: {m.get('desc', '-')[:40]}" for code, m in info["movies"].items()
-        )
-        await message.answer(text)
+        lines = []
+        for code, m in info["movies"].items():
+            if m.get("type") == "series":
+                lines.append(f"• Kod {code} 📺 [Serial] {m.get('title', '-')} ({len(m.get('episodes', {}))} qism)")
+            else:
+                lines.append(f"• Kod {code} 🎬 {m.get('desc', '-')[:40]}")
+        await message.answer("📋 <b>Filmlar:</b>\n\n" + "\n".join(lines))
 
     @dp.message(F.text == "🗑 Film o'chirish")
     async def del_movie_start(message: Message):
@@ -1001,14 +1140,17 @@ def setup_kino_bot(dp: Dispatcher, token: str):
         code = message.text.strip()
         info["stats"]["requests"] += 1
         save_data()
-        movie = info["movies"].get(code)
-        if movie:
-            caption = f"🎬 Kod: {code}"
-            if movie.get("desc"):
-                caption += f"\n\n{movie['desc']}"
-            await message.answer_video(movie["file_id"], caption=caption)
-        else:
+        entry = info["movies"].get(code)
+        if not entry:
             await message.answer("❌ Bunday kodli film topilmadi.")
+            return
+        if entry.get("type") == "series":
+            await send_series_episode(message.answer_video, entry, code, 1)
+        else:
+            caption = f"🎬 Kod: {code}"
+            if entry.get("desc"):
+                caption += f"\n\n{entry['desc']}"
+            await message.answer_video(entry["file_id"], caption=caption)
 
 
 # ---------- Savdo bot ----------
